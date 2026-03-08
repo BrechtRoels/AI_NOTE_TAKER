@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from pathlib import Path
 from pydub import AudioSegment
-from pyannote.audio import Pipeline, Inference
+from pyannote.audio import Pipeline
 from pyannote.audio.core.model import Model
 from sklearn.metrics.pairwise import cosine_similarity as cos_sim
 from config import HF_AUTH_TOKEN
@@ -69,20 +69,20 @@ def get_pipeline() -> Pipeline:
     return _pipeline
 
 
-def get_embedding_model() -> Inference:
+def get_embedding_model() -> Model:
     global _embedding_model
     if _embedding_model is None:
         if _has_local_models():
             logger.info("Loading embedding model from local models")
-            model = Model.from_pretrained(str(_LOCAL_EMBEDDING.resolve()), strict=False)
+            _embedding_model = Model.from_pretrained(str(_LOCAL_EMBEDDING.resolve()), strict=False)
         else:
             logger.info("Loading embedding model from HuggingFace")
-            model = Model.from_pretrained(
+            _embedding_model = Model.from_pretrained(
                 "pyannote/wespeaker-voxceleb-resnet34-LM",
                 token=HF_AUTH_TOKEN,
                 strict=False,
             )
-        _embedding_model = Inference(model)
+        _embedding_model.eval()
         if torch.backends.mps.is_available():
             _embedding_model.to(torch.device("mps"))
         elif torch.cuda.is_available():
@@ -163,8 +163,11 @@ def _compute_speaker_embeddings(
             continue
 
         try:
-            emb = model({"waveform": speaker_audio, "sample_rate": sample_rate})
-            embeddings[speaker] = np.array(emb).flatten()
+            # Model expects (batch, channels, samples) tensor
+            input_tensor = speaker_audio.unsqueeze(0)  # (1, 1, samples)
+            with torch.inference_mode():
+                emb = model(input_tensor)
+            embeddings[speaker] = emb.cpu().numpy().flatten()
         except Exception as e:
             logger.warning(f"Embedding failed for {speaker}: {e}")
 
