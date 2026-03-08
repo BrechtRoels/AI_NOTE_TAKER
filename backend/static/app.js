@@ -800,7 +800,7 @@ function resetRecState() {
 
   recState = {
     configured: false, name: "", mic: true, screen: false, sysAudio: true, micId: "",
-    devices: [], tags: [], tagInput: "", sessionId: null, status: "idle", segments: [], notes: [], qa: [], summary: null,
+    devices: [], tags: [], tagInput: "", existingTags: [], sessionId: null, status: "idle", segments: [], notes: [], qa: [], summary: null,
     suggestions: [], suggestionsLoading: false, suggestionsInterval: null, suggestionsTimeout: null,
     error: null, askBusy: false, mediaRecorder: null, archivalRecorder: null, archivalChunks: [],
     streams: [], audioCtx: null,
@@ -819,6 +819,15 @@ function fmtElapsed(ms) {
 
 async function renderRecordSetup(app) {
   resetRecState();
+
+  // Fetch existing tags from past meetings
+  try {
+    const resp = await api("/api/meetings");
+    const meetings = resp.meetings || resp;
+    const tagSet = new Set();
+    meetings.forEach(m => (m.tags || []).forEach(t => tagSet.add(t)));
+    recState.existingTags = [...tagSet].sort();
+  } catch { recState.existingTags = []; }
 
   // Enumerate mic devices
   try {
@@ -852,13 +861,22 @@ function renderSetupForm(app) {
 
     <div class="form-group">
       <label class="form-label">Tags</label>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px">
         ${recState.tags.map((t, i) => `<span class="tag-pill">${esc(t)} <button class="tag-remove" onclick="recState.tags.splice(${i},1);renderSetupForm(document.getElementById('app'))">&times;</button></span>`).join("")}
         <div style="display:flex;gap:6px;align-items:center">
-          <input class="form-input" id="recTagInput" type="text" placeholder="e.g. Client X, Internal" style="width:180px;padding:8px 12px" value="${esc(recState.tagInput)}" />
+          <input class="form-input" id="recTagInput" type="text" placeholder="Add new tag..." style="width:180px;padding:8px 12px" value="${esc(recState.tagInput)}" />
           <button class="btn-secondary" style="padding:8px;min-width:auto" onclick="addRecTag()">${ICONS.tag}</button>
         </div>
       </div>
+      ${(recState.existingTags || []).filter(t => !recState.tags.includes(t)).length > 0 ? `
+      <div style="margin-top:4px">
+        <span style="font-size:12px;color:var(--c-fg2);margin-right:8px">Past tags:</span>
+        <div style="display:inline-flex;flex-wrap:wrap;gap:6px">
+          ${(recState.existingTags || []).filter(t => !recState.tags.includes(t)).map(t =>
+            `<button class="tag-pill-sm tag-suggestion-btn" onclick="recState.tags.push('${esc(t).replace(/'/g, "\\'")}');renderSetupForm(document.getElementById('app'))">${esc(t)} ${ICONS.plus}</button>`
+          ).join("")}
+        </div>
+      </div>` : ""}
     </div>
 
     <div class="form-group">

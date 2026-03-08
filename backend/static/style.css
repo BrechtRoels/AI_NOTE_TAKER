@@ -2169,6 +2169,26 @@ a.seg-time:hover { color: var(--c-primary); }
   color: var(--c-fg2);
 }
 
+.tag-suggestion-btn {
+  cursor: pointer;
+  border: 1px dashed var(--c-edge-strong);
+  background: transparent;
+  gap: 4px;
+  padding: 4px 10px;
+  transition: all 0.15s;
+}
+
+.tag-suggestion-btn:hover {
+  background: var(--c-primary-10);
+  border-color: var(--c-primary);
+  color: var(--c-primary);
+}
+
+.tag-suggestion-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
 .meeting-card-tags {
   display: flex;
   flex-wrap: wrap;

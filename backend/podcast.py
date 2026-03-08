@@ -50,12 +50,28 @@ async def generate_script(
     # Estimate ~150 words per minute of speech
     target_words = duration_minutes * 150
 
-    prompt = f"""You are a podcast script writer. Create an engaging, conversational podcast script
-based on the following meeting transcripts. The podcast should feel natural and informative.
+    if num_speakers == 1:
+        style_instructions = f"""SPEAKER: {speaker_names[0]} (solo presenter)
 
-SPEAKERS: {speakers_desc}
+STYLE: This is a solo news bulletin / briefing style podcast. {speaker_names[0]} is a confident,
+professional presenter delivering a well-structured update — like a news anchor or briefing host.
+
+REQUIREMENTS:
+- Target length: approximately {target_words} words ({duration_minutes} minutes)
+- Use a clear, authoritative but approachable tone
+- Structure the content with smooth transitions between topics (e.g. "Moving on to...", "Now let's turn to...", "Another key point from this meeting...")
+- Go IN DEPTH on what was discussed — don't just list topics, explain them thoroughly
+- Cover specific details: problems raised, solutions proposed, decisions made, action items
+- Quote or paraphrase interesting points from the meetings
+- INTRODUCTION: Open with a professional greeting, set the scene (what meetings are being covered, the overall theme), and preview the key topics
+- CLOSING: Wrap up with a concise summary of key takeaways, open questions, and next steps. Sign off cleanly.
+- Keep it engaging — vary sentence length, use rhetorical questions, and add brief commentary or analysis"""
+    else:
+        style_instructions = f"""SPEAKERS: {speakers_desc}
 - {speaker_names[0]} is the main host who guides the conversation
 - Other speakers are co-hosts who add insights and ask questions
+
+STYLE: This is a multi-host conversational podcast. It should feel like a natural, lively discussion.
 
 REQUIREMENTS:
 - Target length: approximately {target_words} words ({duration_minutes} minutes)
@@ -66,13 +82,21 @@ REQUIREMENTS:
 - Speakers should debate, ask follow-up questions, and share their reactions to the meeting content
 - Make it conversational and engaging - not a dry summary
 - Include natural transitions between topics
-- IMPORTANT: Do NOT have speakers take turns in a rigid round-robin pattern (e.g. A, B, C, A, B, C). Real conversations are unpredictable - the same speaker might talk twice in a row, someone might jump in with a short reaction, or two speakers might have a back-and-forth before the third chimes in. Vary the speaker order to feel like a natural, spontaneous discussion.
-- INTRODUCTION: Start with an energetic, welcoming opener. The host should greet the audience, introduce the co-hosts by name, explain the context of the podcast (what meetings were held, who participated, what the overall theme or project is), and give a compelling preview of what's coming — tease the most interesting topics to hook the listener
-- CLOSING: End with a strong wrap-up. Summarize the key takeaways, highlight any open questions or next steps, and sign off warmly (e.g. thank the co-hosts, invite listeners to tune in next time)
+- IMPORTANT: Do NOT have speakers take turns in a rigid round-robin pattern (e.g. A, B, C, A, B, C). Real conversations are unpredictable — the same speaker might talk twice in a row, someone might jump in with a short reaction, or two speakers might have a back-and-forth before the third chimes in. Vary the speaker order to feel natural.
+- INTRODUCTION: Start with an energetic, welcoming opener. The host should greet the audience, introduce the co-hosts by name, explain the context, and preview what's coming
+- CLOSING: End with a strong wrap-up. Summarize key takeaways, highlight open questions, and sign off warmly"""
+
+    example_turn2 = f', {{"speaker": "{speaker_names[1]}", "text": "Thanks for having me..."}}' if num_speakers > 1 else ''
+
+    prompt = f"""You are a podcast script writer. Create an engaging podcast script
+based on the following meeting transcripts.
+
+{style_instructions}
 
 FORMAT: Return ONLY a JSON array of objects, each with "speaker" and "text" fields.
-Example: [{{"speaker": "{speaker_names[0]}", "text": "Welcome to..."}}, {{"speaker": "{speaker_names[1]}", "text": "Thanks for having me..."}}]
+Example: [{{"speaker": "{speaker_names[0]}", "text": "Welcome to..."}}{example_turn2}]
 
+ONLY use these speaker names: {speakers_desc}. Do NOT invent additional speakers.
 Do NOT include any text outside the JSON array.
 
 MEETING TRANSCRIPTS:
@@ -104,10 +128,13 @@ PODCAST SCRIPT (JSON only):"""
         # Fallback: create a simple script
         turns = [{"speaker": speaker_names[0], "text": raw}]
 
-    # Validate turns
+    # Validate turns and enforce speaker count
     valid_turns = []
     for turn in turns:
         if isinstance(turn, dict) and "speaker" in turn and "text" in turn:
+            # Remap unknown speakers to the closest valid one
+            if turn["speaker"] not in speaker_names:
+                turn["speaker"] = speaker_names[len(valid_turns) % len(speaker_names)]
             valid_turns.append(turn)
 
     return valid_turns if valid_turns else [{"speaker": speaker_names[0], "text": raw}]
@@ -161,7 +188,7 @@ async def generate_podcast(
     logger.info(f"Script generated: {len(script)} turns")
 
     # 2. Assign voices to speakers
-    speaker_names = list(dict.fromkeys(t["speaker"] for t in script))
+    speaker_names = _get_speaker_names(num_speakers)
     voice_map = {}
     for i, name in enumerate(speaker_names):
         voice_map[name] = VOICES[i % len(VOICES)]
