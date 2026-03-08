@@ -2,8 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Loader2, FileText, ListChecks, MessageSquare } from "lucide-react";
-import { getMeeting, type MeetingDetail } from "@/lib/api";
+import { ArrowLeft, Loader2, FileText, ListChecks, MessageSquare, Tag, Plus, X } from "lucide-react";
+import { getMeeting, updateMeeting, type MeetingDetail } from "@/lib/api";
 
 const COLORS = ["#4f7df9", "#f04545", "#34c759", "#f5a623", "#a855f7", "#14b8a6", "#f97316", "#ec4899"];
 function spkColor(s: string) {
@@ -31,10 +31,31 @@ export default function MeetingDetailPage() {
   const [meeting, setMeeting] = useState<MeetingDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("transcript");
+  const [newTag, setNewTag] = useState("");
+  const [showTagInput, setShowTagInput] = useState(false);
 
   useEffect(() => {
     if (id) getMeeting(id).then(setMeeting).catch((e) => setError(e.message));
   }, [id]);
+
+  const addTag = async () => {
+    const tag = newTag.trim();
+    if (!tag || !meeting) return;
+    const tags = [...(meeting.tags || [])];
+    if (tags.includes(tag)) { setNewTag(""); return; }
+    tags.push(tag);
+    await updateMeeting(id, { tags });
+    setMeeting({ ...meeting, tags });
+    setNewTag("");
+    setShowTagInput(false);
+  };
+
+  const removeTag = async (tag: string) => {
+    if (!meeting) return;
+    const tags = (meeting.tags || []).filter((t) => t !== tag);
+    await updateMeeting(id, { tags });
+    setMeeting({ ...meeting, tags });
+  };
 
   if (error) return (
     <div className="p-10"><div className="px-4 py-3 rounded-xl bg-danger/10 border border-danger/20 text-sm text-danger">{error}</div></div>
@@ -56,7 +77,45 @@ export default function MeetingDetailPage() {
           </button>
           <div className="flex-1 min-w-0">
             <h1 className="text-base font-semibold text-foreground truncate">{meeting.name}</h1>
-            <p className="text-xs text-hint mt-0.5">{fmtDate(meeting.created_at)}</p>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-xs text-hint">{fmtDate(meeting.created_at)}</p>
+              {/* Tags */}
+              <div className="flex items-center gap-1.5">
+                {(meeting.tags || []).map((tag) => (
+                  <span key={tag} className="group/tag inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-raised text-[11px] text-secondary font-medium">
+                    {tag}
+                    <button
+                      type="button"
+                      onClick={() => removeTag(tag)}
+                      className="hidden group-hover/tag:grid place-items-center w-3 h-3 rounded-full hover:bg-danger/20 text-hint hover:text-danger transition-colors bg-transparent border-0 cursor-pointer p-0"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </span>
+                ))}
+                {showTagInput ? (
+                  <input
+                    type="text"
+                    value={newTag}
+                    onChange={(e) => setNewTag(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") addTag(); if (e.key === "Escape") { setShowTagInput(false); setNewTag(""); } }}
+                    onBlur={() => { if (newTag.trim()) addTag(); else setShowTagInput(false); }}
+                    placeholder="Tag name"
+                    autoFocus
+                    className="px-2 py-0.5 rounded-full bg-raised border border-edge text-[11px] text-foreground outline-none focus:border-primary w-20"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowTagInput(true)}
+                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[11px] text-hint hover:text-foreground hover:bg-raised transition-colors bg-transparent border-0 cursor-pointer"
+                  >
+                    <Plus className="w-3 h-3" />
+                    <Tag className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
           <span className="text-xs text-hint px-2.5 py-1 rounded-full bg-raised">{meeting.total_segments} segments</span>
         </div>

@@ -30,6 +30,7 @@ export type MeetingListItem = {
   status: string;
   created_at: string;
   total_segments: number;
+  tags: string[];
 };
 
 export type MeetingDetail = {
@@ -42,6 +43,7 @@ export type MeetingDetail = {
   total_segments: number;
   summary: Summary;
   qa_history: Array<{ question: string; answer: string }>;
+  tags: string[];
 };
 
 export type UsageModel = {
@@ -73,18 +75,36 @@ export async function deleteMeeting(id: string): Promise<void> {
   return request(`/api/meetings/${id}`, { method: "DELETE" });
 }
 
+export async function updateMeeting(
+  id: string,
+  updates: { name?: string; tags?: string[] }
+): Promise<{ status: string; name: string; tags: string[] }> {
+  return request(`/api/meetings/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+}
+
 // ── Sessions ────────────────────────────────────────────────────────
 
 export async function createSession(config: {
   name: string;
   record_screen: boolean;
   record_mic: boolean;
+  tags?: string[];
 }): Promise<{ session_id: string; status: string; name: string }> {
   return request("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
+}
+
+export async function getSuggestions(
+  sessionId: string
+): Promise<{ suggestions: string[]; related_meetings: Array<{ id: string; name: string }> }> {
+  return request(`/api/sessions/${sessionId}/suggestions`);
 }
 
 export async function uploadAudioChunk(

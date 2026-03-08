@@ -47,6 +47,7 @@ def list_meetings() -> list[dict]:
             "status": data.get("status"),
             "created_at": data.get("created_at"),
             "total_segments": data.get("total_segments", 0),
+            "tags": data.get("tags", []),
         })
     meetings.sort(key=lambda m: m.get("created_at", ""), reverse=True)
     return meetings
@@ -70,6 +71,15 @@ def rename_meeting(session_id: str, new_name: str) -> bool:
     if not data:
         return False
     data["name"] = new_name
+    save_meeting(session_id, data)
+    return True
+
+
+def update_meeting_tags(session_id: str, tags: list[str]) -> bool:
+    data = load_meeting(session_id)
+    if not data:
+        return False
+    data["tags"] = tags
     save_meeting(session_id, data)
     return True
 

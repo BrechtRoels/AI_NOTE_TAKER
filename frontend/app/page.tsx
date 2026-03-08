@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Mic, Trash2, Calendar, Hash, Loader2, Plus } from "lucide-react";
+import { Mic, Trash2, Calendar, Hash, Loader2, Plus, Tag, X } from "lucide-react";
 import { listMeetings, deleteMeeting, type MeetingListItem } from "@/lib/api";
 
 export default function MeetingsPage() {
   const [meetings, setMeetings] = useState<MeetingListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeTag, setActiveTag] = useState<string | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -32,6 +33,17 @@ export default function MeetingsPage() {
       hour: "2-digit", minute: "2-digit",
     });
 
+  // Collect all unique tags
+  const allTags = useMemo(() => {
+    const tags = new Set<string>();
+    meetings.forEach((m) => (m.tags || []).forEach((t) => tags.add(t)));
+    return Array.from(tags).sort();
+  }, [meetings]);
+
+  const filtered = activeTag
+    ? meetings.filter((m) => (m.tags || []).includes(activeTag))
+    : meetings;
+
   return (
     <div className="px-10 py-10 max-w-4xl mx-auto">
       {/* Header */}
@@ -48,6 +60,28 @@ export default function MeetingsPage() {
           New Recording
         </Link>
       </header>
+
+      {/* Tag filter */}
+      {allTags.length > 0 && (
+        <div className="flex items-center gap-2 mb-6 flex-wrap">
+          <Tag className="w-3.5 h-3.5 text-hint shrink-0" />
+          {allTags.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              onClick={() => setActiveTag(activeTag === tag ? null : tag)}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition-colors border-0 cursor-pointer ${
+                activeTag === tag
+                  ? "bg-primary text-primary-fg"
+                  : "bg-raised text-secondary hover:text-foreground"
+              }`}
+            >
+              {tag}
+              {activeTag === tag && <X className="w-3 h-3" />}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Loading */}
       {loading && (
@@ -76,7 +110,7 @@ export default function MeetingsPage() {
 
       {/* List */}
       <div className="space-y-2">
-        {meetings.map((m) => (
+        {filtered.map((m) => (
           <article
             key={m.session_id}
             onClick={() => router.push(`/meetings/${m.session_id}`)}
@@ -98,6 +132,15 @@ export default function MeetingsPage() {
                   {m.total_segments} segments
                 </span>
               </div>
+              {(m.tags || []).length > 0 && (
+                <div className="flex items-center gap-1.5 mt-1.5">
+                  {m.tags.map((tag) => (
+                    <span key={tag} className="inline-flex items-center px-2 py-0.5 rounded-full bg-raised text-[11px] text-secondary font-medium">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
 
             <button

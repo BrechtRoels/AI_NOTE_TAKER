@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from transcript import TranscriptStore
 from diarization import diarize_audio, get_audio_duration, rediarize_full_audio, SpeakerRegistry
 from stt import transcribe_audio
-from storage import save_meeting, load_meeting, list_meetings, delete_meeting, load_all_meetings, rename_meeting, save_audio, get_audio_path
+from storage import save_meeting, load_meeting, list_meetings, delete_meeting, load_all_meetings, rename_meeting, update_meeting_tags, save_audio, get_audio_path
 from config import AVAILABLE_MODELS, get_active_models, set_model
 from audio_capture import SystemAudioCapture
 from mom_generator import generate_mom
@@ -75,6 +75,7 @@ class CreateSessionRequest(BaseModel):
     name: str = "Untitled Meeting"
     record_screen: bool = True
     record_mic: bool = True
+    tags: list[str] = []
 
 class SessionResponse(BaseModel):
     session_id: str
@@ -492,6 +493,7 @@ async def upload_transcript(file: UploadFile = File(...), name: str | None = Non
         "total_segments": len(segments),
         "summary": summary,
         "qa_history": [],
+        "tags": [],
         "source": "upload",
     })
 
@@ -661,16 +663,23 @@ async def get_meeting_audio(meeting_id: str):
     return FileResponse(path, media_type="audio/webm")
 
 
-class RenameMeetingRequest(BaseModel):
-    name: str
+class PatchMeetingRequest(BaseModel):
+    name: str | None = None
+    tags: list[str] | None = None
 
 
 @app.patch("/api/meetings/{meeting_id}")
-async def patch_meeting(meeting_id: str, req: RenameMeetingRequest):
-    """Rename a meeting."""
-    if not rename_meeting(meeting_id, req.name):
+async def patch_meeting(meeting_id: str, req: PatchMeetingRequest):
+    """Update a meeting's name and/or tags."""
+    data = load_meeting(meeting_id)
+    if not data:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    return {"status": "renamed", "name": req.name}
+    if req.name is not None:
+        data["name"] = req.name
+    if req.tags is not None:
+        data["tags"] = req.tags
+    save_meeting(meeting_id, data)
+    return {"status": "updated", "name": data.get("name"), "tags": data.get("tags", [])}
 
 
 # ── Session endpoints ────────────────────────────────────────────────
@@ -685,6 +694,7 @@ async def create_session(req: CreateSessionRequest = CreateSessionRequest()):
         "status": "recording",
         "record_screen": req.record_screen,
         "record_mic": req.record_mic,
+        "tags": req.tags,
         "store": TranscriptStore(),
         "speaker_registry": SpeakerRegistry(),
         "summary": None,
@@ -756,6 +766,107 @@ async def get_transcript(session_id: str, recent: bool = False):
     }
 
 
+@app.get("/api/sessions/{session_id}/suggestions")
+async def get_suggestions(session_id: str):
+    """Generate live suggestions based on past meetings with matching tags.
+
+    Looks at the current transcript so far, finds past meetings that share
+    the same tags, and generates contextual suggestions (reminders of past
+    decisions, open action items, relevant context).
+    """
+    from genai_client import llm_complete
+    from config import GENAI_LLM_MODEL
+
+    session = get_session(session_id)
+    store: TranscriptStore = session["store"]
+    session_tags = session.get("tags", [])
+
+    if not session_tags:
+        return {"suggestions": [], "related_meetings": []}
+
+    current_transcript = store.get_full_transcript()
+    if not current_transcript or len(current_transcript.strip()) < 50:
+        return {"suggestions": [], "related_meetings": []}
+
+    # Find past meetings with overlapping tags
+    all_meetings = load_all_meetings()
+    related = []
+    for m in all_meetings:
+        if m.get("id") == session_id:
+            continue
+        meeting_tags = m.get("tags", [])
+        if any(t in meeting_tags for t in session_tags):
+            related.append(m)
+
+    if not related:
+        return {"suggestions": [], "related_meetings": []}
+
+    # Build context from related meetings (summaries + action items)
+    past_context_parts = []
+    related_info = []
+    for m in related[:10]:
+        name = m.get("name", "Untitled")
+        related_info.append({"id": m.get("id"), "name": name})
+        summary = m.get("summary", {})
+        if isinstance(summary, dict):
+            parts = []
+            if summary.get("summary"):
+                parts.append(f"Summary: {summary['summary']}")
+            if summary.get("action_items"):
+                parts.append("Action items: " + "; ".join(summary["action_items"]))
+            if summary.get("decisions"):
+                parts.append("Decisions: " + "; ".join(summary["decisions"]))
+            if parts:
+                past_context_parts.append(f"[{name}]\n" + "\n".join(parts))
+
+    if not past_context_parts:
+        return {"suggestions": [], "related_meetings": related_info}
+
+    past_context = "\n\n".join(past_context_parts)
+
+    prompt = f"""You are a meeting assistant providing live suggestions during a meeting.
+
+The current meeting shares tags with previous meetings. Based on what is being discussed NOW
+and what was discussed PREVIOUSLY, generate concise, actionable suggestions.
+
+Focus on:
+- Reminders of unresolved action items from past meetings that are relevant to what's being discussed
+- Previous decisions that relate to the current discussion
+- Context the participants might have forgotten or should be aware of
+- Potential follow-ups based on patterns from past meetings
+
+PAST MEETINGS CONTEXT:
+{past_context[:4000]}
+
+CURRENT MEETING TRANSCRIPT (so far):
+{current_transcript[:3000]}
+
+Return 2-5 brief, specific suggestions. Each suggestion should be one clear sentence.
+If nothing relevant is found, return an empty list.
+
+Format your response as a JSON array of strings, e.g.:
+["suggestion 1", "suggestion 2"]
+
+SUGGESTIONS:"""
+
+    try:
+        raw = await llm_complete(prompt, model=GENAI_LLM_MODEL)
+        # Parse JSON array from response
+        import json as _json
+        raw = raw.strip()
+        # Handle markdown code blocks
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        suggestions = _json.loads(raw)
+        if not isinstance(suggestions, list):
+            suggestions = []
+    except Exception as e:
+        logger.warning(f"Suggestions generation failed: {e}")
+        suggestions = []
+
+    return {"suggestions": suggestions, "related_meetings": related_info}
+
+
 @app.post("/api/sessions/{session_id}/ask", response_model=AskResponse)
 async def ask_question(session_id: str, req: AskRequest):
     """Ask a question about the meeting transcript so far."""
@@ -824,6 +935,7 @@ async def finish_session(session_id: str, body: FinishRequest | None = None):
         "summary": summary,
         "qa_history": session["qa_history"],
         "notes": notes,
+        "tags": session.get("tags", []),
     })
 
     return {

@@ -2127,6 +2127,216 @@ a.seg-time:hover { color: var(--c-primary); }
   color: var(--c-primary);
 }
 
+/* ── Tags ─────────────────────────────────────────────────────── */
+
+.tag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--c-raised);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--c-fg2);
+}
+
+.tag-pill .tag-remove {
+  background: none;
+  border: none;
+  color: var(--c-fg3);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+  border-radius: 50%;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tag-pill .tag-remove:hover {
+  color: var(--c-danger);
+  background: var(--c-danger-10);
+}
+
+.tag-pill-sm {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--c-raised);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--c-fg2);
+}
+
+.meeting-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.tag-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.tag-filter-bar svg {
+  width: 14px;
+  height: 14px;
+  color: var(--c-fg3);
+  flex-shrink: 0;
+}
+
+.tag-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: none;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: var(--c-raised);
+  color: var(--c-fg2);
+}
+
+.tag-filter-btn:hover {
+  color: var(--c-fg);
+}
+
+.tag-filter-btn.active {
+  background: var(--c-primary);
+  color: var(--c-primary-fg);
+}
+
+.tag-filter-btn.active svg {
+  width: 12px;
+  height: 12px;
+}
+
+.detail-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.detail-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tag-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: none;
+  background: none;
+  color: var(--c-fg3);
+  cursor: pointer;
+  font-size: 11px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tag-add-btn:hover {
+  color: var(--c-fg);
+  background: var(--c-raised);
+}
+
+.tag-add-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.tag-inline-input {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--c-edge);
+  background: var(--c-raised);
+  color: var(--c-fg);
+  font-size: 12px;
+  outline: none;
+  width: 100px;
+}
+
+.tag-inline-input:focus {
+  border-color: var(--c-primary);
+}
+
+/* ── Suggestions Panel ────────────────────────────────────────── */
+
+.suggestions-box {
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-edge);
+  margin-bottom: 12px;
+}
+
+.suggestions-box .section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.suggestions-box .section-title svg {
+  width: 16px;
+  height: 16px;
+  color: var(--c-warn);
+}
+
+.suggestions-empty {
+  font-size: 12px;
+  color: var(--c-fg3);
+  margin: 8px 0 0;
+}
+
+.suggestions-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--c-fg3);
+  margin-top: 8px;
+}
+
+.suggestions-loading svg {
+  width: 16px;
+  height: 16px;
+}
+
+.suggestion-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border-radius: 8px;
+  background: rgba(255, 182, 0, 0.06);
+  border: 1px solid rgba(255, 182, 0, 0.15);
+  font-size: 13px;
+  color: var(--c-fg);
+  line-height: 1.5;
+}
+
+.suggestion-item svg {
+  width: 16px;
+  height: 16px;
+  color: var(--c-warn);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
 /* ── Utilities ────────────────────────────────────────────────── */
 
 .hidden { display: none !important; }

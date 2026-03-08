@@ -63,6 +63,9 @@ const ICONS = {
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
   pencil: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/></svg>',
   download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>',
+  tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></svg>',
+  lightbulb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
   refreshCw: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>',
 };
 
@@ -621,6 +624,43 @@ async function renderMeetings(app) {
       return;
     }
 
+    // Collect all unique tags
+    const allTags = new Set();
+    data.meetings.forEach(m => (m.tags || []).forEach(t => allTags.add(t)));
+    let activeTagFilter = null;
+
+    // Tag filter bar
+    if (allTags.size > 0) {
+      container.insertAdjacentHTML("beforeend", `<div class="tag-filter-bar" id="tagFilterBar"></div>`);
+    }
+
+    function renderTagFilter() {
+      const bar = document.getElementById("tagFilterBar");
+      if (!bar) return;
+      bar.innerHTML = `${ICONS.tag} ${Array.from(allTags).sort().map(tag =>
+        `<button class="tag-filter-btn${activeTagFilter === tag ? " active" : ""}" data-tag="${esc(tag)}">${esc(tag)}${activeTagFilter === tag ? " " + ICONS.x : ""}</button>`
+      ).join("")}`;
+      bar.querySelectorAll(".tag-filter-btn").forEach(btn => {
+        btn.onclick = () => {
+          const t = btn.dataset.tag;
+          activeTagFilter = activeTagFilter === t ? null : t;
+          renderTagFilter();
+          filterMeetingCards();
+        };
+      });
+    }
+
+    function filterMeetingCards() {
+      const searchVal = document.getElementById("meetingSearch")?.value.toLowerCase() || "";
+      document.querySelectorAll(".meeting-card").forEach(card => {
+        const name = card.querySelector("h3")?.textContent.toLowerCase() || "";
+        const cardTags = JSON.parse(card.dataset.tags || "[]");
+        const matchSearch = !searchVal || name.includes(searchVal);
+        const matchTag = !activeTagFilter || cardTags.includes(activeTagFilter);
+        card.style.display = (matchSearch && matchTag) ? "" : "none";
+      });
+    }
+
     // Search bar
     if (data.meetings.length > 1) {
       container.insertAdjacentHTML("beforeend", `
@@ -628,21 +668,21 @@ async function renderMeetings(app) {
           ${ICONS.search}
           <input type="text" id="meetingSearch" placeholder="Search meetings..." />
         </div>`);
-      document.getElementById("meetingSearch").oninput = (e) => {
-        const q = e.target.value.toLowerCase();
-        document.querySelectorAll(".meeting-card").forEach(card => {
-          const name = card.querySelector("h3")?.textContent.toLowerCase() || "";
-          card.style.display = name.includes(q) ? "" : "none";
-        });
-      };
+      document.getElementById("meetingSearch").oninput = () => filterMeetingCards();
     }
+
+    if (allTags.size > 0) renderTagFilter();
 
     const list = document.createElement("div");
     list.className = "meeting-list";
     data.meetings.forEach(m => {
       const card = document.createElement("article");
       card.className = "meeting-card";
+      card.dataset.tags = JSON.stringify(m.tags || []);
       card.onclick = () => navigate(`/meetings/${m.session_id}`);
+      const tagPills = (m.tags || []).length > 0
+        ? `<div class="meeting-card-tags">${m.tags.map(t => `<span class="tag-pill-sm">${esc(t)}</span>`).join("")}</div>`
+        : "";
       card.innerHTML = `
         <div class="meeting-card-icon">${ICONS.mic}</div>
         <div class="meeting-card-body">
@@ -651,6 +691,7 @@ async function renderMeetings(app) {
             <span>${ICONS.calendar} ${fmtDate(m.created_at)}</span>
             <span>${ICONS.hash} ${m.total_segments} segments</span>
           </div>
+          ${tagPills}
         </div>
         <button class="btn-delete" title="Delete">${ICONS.trash}</button>`;
 
@@ -751,13 +792,16 @@ function resetRecState() {
   if (recState.chunkInterval) clearInterval(recState.chunkInterval);
   if (recState.pollInterval) clearInterval(recState.pollInterval);
   if (recState.timerInterval) clearInterval(recState.timerInterval);
+  if (recState.suggestionsInterval) clearInterval(recState.suggestionsInterval);
+  if (recState.suggestionsTimeout) clearTimeout(recState.suggestionsTimeout);
   if (recState.mediaRecorder && recState.mediaRecorder.state !== "inactive") recState.mediaRecorder.stop();
   recState.streams.forEach(s => s.getTracks().forEach(t => t.stop()));
   if (recState.audioCtx) { try { recState.audioCtx.close(); } catch {} }
 
   recState = {
     configured: false, name: "", mic: true, screen: false, sysAudio: true, micId: "",
-    devices: [], sessionId: null, status: "idle", segments: [], notes: [], qa: [], summary: null,
+    devices: [], tags: [], tagInput: "", sessionId: null, status: "idle", segments: [], notes: [], qa: [], summary: null,
+    suggestions: [], suggestionsLoading: false, suggestionsInterval: null, suggestionsTimeout: null,
     error: null, askBusy: false, mediaRecorder: null, archivalRecorder: null, archivalChunks: [],
     streams: [], audioCtx: null,
     chunkInterval: null, pendingUploads: 0, pollInterval: null, timerInterval: null, startTime: null,
@@ -807,6 +851,17 @@ function renderSetupForm(app) {
     </div>
 
     <div class="form-group">
+      <label class="form-label">Tags</label>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        ${recState.tags.map((t, i) => `<span class="tag-pill">${esc(t)} <button class="tag-remove" onclick="recState.tags.splice(${i},1);renderSetupForm(document.getElementById('app'))">&times;</button></span>`).join("")}
+        <div style="display:flex;gap:6px;align-items:center">
+          <input class="form-input" id="recTagInput" type="text" placeholder="e.g. Client X, Internal" style="width:180px;padding:8px 12px" value="${esc(recState.tagInput)}" />
+          <button class="btn-secondary" style="padding:8px;min-width:auto" onclick="addRecTag()">${ICONS.tag}</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-group">
       <label class="form-label">Audio Sources</label>
       <div class="source-list">
         <label class="source-toggle${recState.mic ? " active" : ""}" id="togMic">
@@ -844,11 +899,26 @@ function renderSetupForm(app) {
   document.getElementById("togSys").onclick = () => { recState.sysAudio = !recState.sysAudio; renderSetupForm(app); };
 
   document.getElementById("recName").oninput = (e) => recState.name = e.target.value;
+  const tagInput = document.getElementById("recTagInput");
+  if (tagInput) {
+    tagInput.oninput = (e) => recState.tagInput = e.target.value;
+    tagInput.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addRecTag(); } };
+  }
   if (document.getElementById("recMicSelect")) {
     document.getElementById("recMicSelect").onchange = (e) => recState.micId = e.target.value;
   }
 
   document.getElementById("btnStartRec").onclick = () => startRecording(app);
+}
+
+function addRecTag() {
+  const raw = (recState.tagInput || "").trim();
+  if (!raw) return;
+  // Support comma-separated tags
+  const newTags = raw.split(",").map(t => t.trim()).filter(t => t && !recState.tags.includes(t));
+  recState.tags.push(...newTags);
+  recState.tagInput = "";
+  renderSetupForm(document.getElementById("app"));
 }
 
 // ── Start Recording ──────────────────────────────────────────────
@@ -867,6 +937,7 @@ async function startRecording(app) {
         name: recState.name || "Untitled Meeting",
         record_screen: recState.screen,
         record_mic: recState.mic,
+        tags: recState.tags,
       }),
     });
 
@@ -899,6 +970,14 @@ async function startRecording(app) {
           updateTranscriptUI();
         } catch {}
       }, 5000);
+    }
+
+    // Live suggestions: first fetch after 60s, then every 2 min
+    if (recState.tags.length > 0) {
+      recState.suggestionsTimeout = setTimeout(() => {
+        fetchSuggestions();
+        recState.suggestionsInterval = setInterval(fetchSuggestions, 120000);
+      }, 60000);
     }
 
     renderActiveRecording(app);
@@ -1008,6 +1087,8 @@ async function stopRecording() {
 
   recState.status = "processing";
   if (recState.timerInterval) { clearInterval(recState.timerInterval); recState.timerInterval = null; }
+  if (recState.suggestionsInterval) { clearInterval(recState.suggestionsInterval); recState.suggestionsInterval = null; }
+  if (recState.suggestionsTimeout) { clearTimeout(recState.suggestionsTimeout); recState.suggestionsTimeout = null; }
   updateRecHeaderUI();
 
   // Stop system audio
@@ -1085,6 +1166,41 @@ function renderNotesList() {
     </div>`).join("");
 }
 
+// ── Live Suggestions ─────────────────────────────────────────────
+
+async function fetchSuggestions() {
+  if (!recState.sessionId || recState.status !== "recording") return;
+  recState.suggestionsLoading = true;
+  updateSuggestionsUI();
+  try {
+    const data = await api(`/api/sessions/${recState.sessionId}/suggestions`);
+    recState.suggestions = data.suggestions || [];
+  } catch {
+    // silently ignore
+  }
+  recState.suggestionsLoading = false;
+  updateSuggestionsUI();
+}
+
+function updateSuggestionsUI() {
+  const panel = document.getElementById("suggestionsPanel");
+  if (!panel) return;
+
+  if (recState.suggestionsLoading && recState.suggestions.length === 0) {
+    panel.innerHTML = `<div class="suggestions-loading">${ICONS.loader} Generating suggestions...</div>`;
+    return;
+  }
+
+  if (recState.suggestions.length === 0) {
+    panel.innerHTML = `<p class="suggestions-empty">Suggestions will appear here after ~1 min if related meetings exist.</p>`;
+    return;
+  }
+
+  panel.innerHTML = recState.suggestions.map(s =>
+    `<div class="suggestion-item">${ICONS.lightbulb}<span>${esc(s)}</span></div>`
+  ).join("");
+}
+
 // ── Render Active Recording ──────────────────────────────────────
 
 function renderActiveRecording(app) {
@@ -1113,6 +1229,13 @@ function renderActiveRecording(app) {
       </section>
 
       <aside class="rec-aside">
+        ${recState.tags.length > 0 ? `
+        <div class="suggestions-box">
+          <h2 class="section-title">${ICONS.lightbulb} Live Suggestions</h2>
+          <div id="suggestionsPanel">
+            <p class="suggestions-empty">Suggestions will appear here after ~1 min if related meetings exist.</p>
+          </div>
+        </div>` : ""}
         <div class="rec-notes-box">
           <h2 class="section-title">Meeting Notes</h2>
           <div class="qa-input-wrap">
@@ -1505,6 +1628,7 @@ async function renderMeetingDetail(app, id) {
     const notesCount = notesArr.length;
 
     function renderDetail() {
+      const detailTags = m.tags || [];
       app.innerHTML = `<div class="detail-layout">
         <header class="detail-header">
           <button class="btn-icon" onclick="navigate('/')">${ICONS.arrowLeft}</button>
@@ -1513,7 +1637,13 @@ async function renderMeetingDetail(app, id) {
               <h1 id="detailName">${esc(m.name)}</h1>
               <button class="btn-icon btn-edit-name" id="btnEditName" title="Rename">${ICONS.pencil}</button>
             </div>
-            <p class="meta">${fmtDateLong(m.created_at)}</p>
+            <div class="detail-meta-row">
+              <p class="meta">${fmtDateLong(m.created_at)}</p>
+              <div class="detail-tags" id="detailTags">
+                ${detailTags.map(t => `<span class="tag-pill">${esc(t)} <button class="tag-remove" data-tag="${esc(t)}">&times;</button></span>`).join("")}
+                <button class="tag-add-btn" id="btnAddTag">${ICONS.plus} ${ICONS.tag}</button>
+              </div>
+            </div>
           </div>
           <button class="btn-secondary" id="btnRegenerate" onclick="regenerateSummary('${id}')">
             ${ICONS.refreshCw} Regenerate Summary
@@ -1557,6 +1687,37 @@ async function renderMeetingDetail(app, id) {
 
       // Rename handler
       document.getElementById("btnEditName").onclick = () => startEditName(id, m, renderDetail);
+
+      // Tag handlers
+      document.querySelectorAll("#detailTags .tag-remove").forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const tag = btn.dataset.tag;
+          m.tags = (m.tags || []).filter(t => t !== tag);
+          try { await api(`/api/meetings/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tags: m.tags }) }); } catch {}
+          renderDetail();
+        };
+      });
+      document.getElementById("btnAddTag").onclick = (e) => {
+        e.stopPropagation();
+        const btn = e.currentTarget;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "Tag name";
+        input.className = "tag-inline-input";
+        btn.replaceWith(input);
+        input.focus();
+        async function saveTag() {
+          const val = input.value.trim();
+          if (val && !(m.tags || []).includes(val)) {
+            m.tags = [...(m.tags || []), val];
+            try { await api(`/api/meetings/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tags: m.tags }) }); } catch {}
+          }
+          renderDetail();
+        }
+        input.onkeydown = (ev) => { if (ev.key === "Enter") saveTag(); if (ev.key === "Escape") renderDetail(); };
+        input.onblur = () => setTimeout(saveTag, 100);
+      };
 
       // Init audio player with segments for sync
       initAudioPlayer(id, m.segments);

@@ -1,9 +1,12 @@
 import io
 import logging
+import os
 import torch
 import numpy as np
+from pathlib import Path
 from pydub import AudioSegment
 from pyannote.audio import Pipeline, Inference
+from pyannote.audio.core.model import Model
 from sklearn.metrics.pairwise import cosine_similarity as cos_sim
 from config import HF_AUTH_TOKEN
 
@@ -12,14 +15,53 @@ logger = logging.getLogger(__name__)
 _pipeline = None
 _embedding_model = None
 
+# Local model paths bundled with the repo
+_MODELS_DIR = Path(__file__).parent / "models"
+_LOCAL_DIARIZATION = _MODELS_DIR / "pyannote-speaker-diarization-3.1" / "config.yaml"
+_LOCAL_SEGMENTATION = _MODELS_DIR / "pyannote-segmentation-3.0" / "pytorch_model.bin"
+_LOCAL_EMBEDDING = _MODELS_DIR / "pyannote-wespeaker-voxceleb-resnet34-LM" / "pytorch_model.bin"
+
+
+def _has_local_models() -> bool:
+    return _LOCAL_DIARIZATION.exists() and _LOCAL_SEGMENTATION.exists() and _LOCAL_EMBEDDING.exists()
+
 
 def get_pipeline() -> Pipeline:
     global _pipeline
     if _pipeline is None:
-        _pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=HF_AUTH_TOKEN,
-        )
+        if _has_local_models():
+            logger.info("Loading diarization pipeline from local models")
+            config = {
+                "version": "3.1.0",
+                "pipeline": {
+                    "name": "pyannote.audio.pipelines.SpeakerDiarization",
+                    "params": {
+                        "clustering": "AgglomerativeClustering",
+                        "embedding": str(_LOCAL_EMBEDDING.resolve()),
+                        "embedding_batch_size": 32,
+                        "embedding_exclude_overlap": True,
+                        "segmentation": str(_LOCAL_SEGMENTATION.resolve()),
+                        "segmentation_batch_size": 32,
+                    },
+                },
+                "params": {
+                    "clustering": {
+                        "method": "centroid",
+                        "min_cluster_size": 12,
+                        "threshold": 0.7045654963945799,
+                    },
+                    "segmentation": {
+                        "min_duration_off": 0.0,
+                    },
+                },
+            }
+            _pipeline = Pipeline.from_pretrained(config)
+        else:
+            logger.info("Loading diarization pipeline from HuggingFace")
+            _pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=HF_AUTH_TOKEN,
+            )
         if torch.backends.mps.is_available():
             _pipeline.to(torch.device("mps"))
         elif torch.cuda.is_available():
@@ -30,10 +72,17 @@ def get_pipeline() -> Pipeline:
 def get_embedding_model() -> Inference:
     global _embedding_model
     if _embedding_model is None:
-        _embedding_model = Inference(
-            "pyannote/wespeaker-voxceleb-resnet34-LM",
-            token=HF_AUTH_TOKEN,
-        )
+        if _has_local_models():
+            logger.info("Loading embedding model from local models")
+            model = Model.from_pretrained(str(_LOCAL_EMBEDDING.resolve()), strict=False)
+        else:
+            logger.info("Loading embedding model from HuggingFace")
+            model = Model.from_pretrained(
+                "pyannote/wespeaker-voxceleb-resnet34-LM",
+                token=HF_AUTH_TOKEN,
+                strict=False,
+            )
+        _embedding_model = Inference(model)
         if torch.backends.mps.is_available():
             _embedding_model.to(torch.device("mps"))
         elif torch.cuda.is_available():

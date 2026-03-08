@@ -2,11 +2,11 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Mic, Monitor, Volume2, Square, Loader2, Send, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, Mic, Monitor, Volume2, Square, Loader2, Send, CheckCircle2, Tag, X, Lightbulb } from "lucide-react";
 import { useRecorder } from "@/lib/use-recorder";
 import {
   createSession, uploadAudioChunk, getTranscript, askQuestion,
-  finishSession, startSystemCapture, stopSystemCapture,
+  finishSession, startSystemCapture, stopSystemCapture, getSuggestions,
   type Segment, type Summary,
 } from "@/lib/api";
 
@@ -36,6 +36,8 @@ export default function RecordPage() {
   const [configured, setConfigured] = useState(false);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [micId, setMicId] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -56,6 +58,8 @@ export default function RecordPage() {
   const [status, setStatus] = useState("idle");
   const [err, setErr] = useState<string | null>(null);
   const [askBusy, setAskBusy] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const sidRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pending = useRef(0);
@@ -82,10 +86,36 @@ export default function RecordPage() {
     return () => clearInterval(iv);
   }, [status, sysAudio]);
 
+  // Live suggestions: first fetch after 60s, then every 2 minutes
+  useEffect(() => {
+    if (status !== "recording" || !sidRef.current || tags.length === 0) return;
+    let cancelled = false;
+
+    const fetchSuggestions = async () => {
+      const id = sidRef.current;
+      if (!id || cancelled) return;
+      setSuggestionsLoading(true);
+      try {
+        const r = await getSuggestions(id);
+        if (!cancelled && r.suggestions.length > 0) setSuggestions(r.suggestions);
+      } catch {}
+      finally { if (!cancelled) setSuggestionsLoading(false); }
+    };
+
+    const initialTimeout = setTimeout(() => {
+      fetchSuggestions();
+      const iv = setInterval(fetchSuggestions, 120_000);
+      cleanupInterval = iv;
+    }, 60_000);
+
+    let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+    return () => { cancelled = true; clearTimeout(initialTimeout); if (cleanupInterval) clearInterval(cleanupInterval); };
+  }, [status, tags]);
+
   const doStart = async () => {
     setErr(null); setSummary(null); setSegs([]); setQa([]);
     try {
-      const s = await createSession({ name: name || "Untitled Meeting", record_screen: screen, record_mic: mic });
+      const s = await createSession({ name: name || "Untitled Meeting", record_screen: screen, record_mic: mic, tags });
       setSid(s.session_id); sidRef.current = s.session_id; setStatus("recording");
       if (mic || screen) await startRec({ recordScreen: screen, recordMic: mic, micDeviceId: micId });
       if (sysAudio) { try { await startSystemCapture(s.session_id); } catch (e: unknown) { setErr("System audio failed: " + (e instanceof Error ? e.message : String(e))); } }
@@ -128,6 +158,45 @@ export default function RecordPage() {
               placeholder="e.g. Sprint Planning Q1"
               className="w-full px-4 py-3 text-sm bg-surface border border-edge rounded-xl text-foreground placeholder:text-hint outline-none focus:border-primary transition-colors"
             />
+          </fieldset>
+
+          {/* Tags */}
+          <fieldset>
+            <legend className="text-xs font-semibold text-secondary uppercase tracking-wider mb-2">Tags</legend>
+            <div className="flex flex-wrap items-center gap-2">
+              {tags.map((tag) => (
+                <span key={tag} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-raised text-xs text-foreground font-medium">
+                  {tag}
+                  <button type="button" onClick={() => setTags(tags.filter((t) => t !== tag))} className="grid place-items-center w-3.5 h-3.5 rounded-full hover:bg-danger/20 text-hint hover:text-danger transition-colors bg-transparent border-0 cursor-pointer p-0">
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={tagInput}
+                  onChange={(e) => setTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && tagInput.trim()) {
+                      e.preventDefault();
+                      if (!tags.includes(tagInput.trim())) setTags([...tags, tagInput.trim()]);
+                      setTagInput("");
+                    }
+                  }}
+                  placeholder="e.g. Client X, Internal"
+                  className="px-3 py-2 text-sm bg-surface border border-edge rounded-lg text-foreground placeholder:text-hint outline-none focus:border-primary transition-colors w-44"
+                />
+                <button
+                  type="button"
+                  onClick={() => { if (tagInput.trim() && !tags.includes(tagInput.trim())) { setTags([...tags, tagInput.trim()]); setTagInput(""); } }}
+                  disabled={!tagInput.trim()}
+                  className="grid place-items-center w-8 h-8 rounded-lg bg-raised text-hint hover:text-foreground disabled:opacity-30 transition-colors border-0 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <Tag className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
           </fieldset>
 
           {/* Sources */}
@@ -237,8 +306,27 @@ export default function RecordPage() {
             </div>
           </div>
 
-          {/* Q&A + summary scroll */}
+          {/* Q&A + suggestions + summary scroll */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {/* Live suggestions */}
+            {(suggestions.length > 0 || suggestionsLoading) && (
+              <div className="p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/20">
+                <h3 className="text-xs font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                  <Lightbulb className="w-3.5 h-3.5" />
+                  Live Suggestions
+                  {suggestionsLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+                </h3>
+                <ul className="space-y-1.5">
+                  {suggestions.map((s, i) => (
+                    <li key={i} className="flex items-start gap-2 text-sm text-foreground">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
+                      {s}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {qa.map((entry, i) => (
               <div key={i} className="p-3.5 rounded-xl bg-raised border border-edge">
                 <p className="text-xs font-semibold text-primary mb-1.5">Q: {entry.question}</p>
