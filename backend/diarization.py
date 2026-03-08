@@ -24,7 +24,18 @@ _LOCAL_PLDA = _MODELS_DIR / "pyannote-speaker-diarization-community-1" / "plda"
 
 
 def _has_local_models() -> bool:
-    return _LOCAL_DIARIZATION.exists() and _LOCAL_SEGMENTATION.exists() and _LOCAL_EMBEDDING.exists() and _LOCAL_PLDA.exists()
+    checks = {
+        "diarization config": _LOCAL_DIARIZATION,
+        "segmentation model": _LOCAL_SEGMENTATION,
+        "embedding model": _LOCAL_EMBEDDING,
+        "plda model": _LOCAL_PLDA,
+    }
+    for name, path in checks.items():
+        if not path.exists():
+            logger.warning(f"Local model missing: {name} at {path}")
+            return False
+    logger.info(f"All local models found in {_MODELS_DIR}")
+    return True
 
 
 def get_pipeline() -> Pipeline:
