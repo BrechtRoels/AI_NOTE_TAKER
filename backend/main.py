@@ -32,7 +32,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from transcript import TranscriptStore
-from diarization import diarize_audio, get_audio_duration, rediarize_full_audio, SpeakerRegistry
+from diarization import get_audio_duration
 from stt import transcribe_audio
 from storage import save_meeting, load_meeting, list_meetings, delete_meeting, load_all_meetings, rename_meeting, update_meeting_tags, save_audio, get_audio_path
 from config import AVAILABLE_MODELS, get_active_models, set_model
@@ -95,102 +95,45 @@ class AskResponse(BaseModel):
     relevant_segments: list[dict]
 
 
-def _find_speaker(time_point: float, diarization_segments: list[dict], fallback: str) -> str:
-    """Find which speaker owns a given time point."""
-    for seg in diarization_segments:
-        if seg["start"] <= time_point <= seg["end"]:
-            return seg["speaker"]
-    return fallback
-
-
-def _merge_diarization_and_text(
+def _add_stt_to_store(
     store: TranscriptStore,
-    diarization_segments: list[dict],
     stt_result: dict,
     batch_offset: float,
-    fallback_speaker: str = "UNKNOWN",
-    speaker_registry: SpeakerRegistry | None = None,
+    speaker: str = "Speaker",
 ):
-    """Align STT output to diarization speakers using timestamps."""
+    """Add STT output to the transcript store."""
     text = stt_result.get("text", "")
     stt_segments = stt_result.get("segments", [])
     stt_words = stt_result.get("words", [])
 
-    # Map chunk-local speaker IDs to persistent session-wide names
-    if speaker_registry and diarization_segments:
-        speaker_map = {}
-        for seg in diarization_segments:
-            if seg["speaker"] not in speaker_map:
-                speaker_map[seg["speaker"]] = speaker_registry.map_speaker(
-                    seg["speaker"], seg.get("_embedding")
-                )
-        for seg in diarization_segments:
-            seg["speaker"] = speaker_map[seg["speaker"]]
-
-    if not diarization_segments:
-        if text.strip():
-            store.add_segment(start=batch_offset, end=batch_offset + 10.0, speaker=fallback_speaker, text=text)
-        return
-
     if not text.strip():
         return
 
-    # Best: word-level timestamps — align each word to a speaker
+    # Best: word-level timestamps
     if stt_words:
-        for w in stt_words:
-            mid = (w["start"] + w["end"]) / 2
-            w["speaker"] = _find_speaker(mid, diarization_segments, fallback_speaker)
-
         groups: list[dict] = []
         for w in stt_words:
-            if groups and groups[-1]["speaker"] == w["speaker"]:
+            if groups:
                 groups[-1]["words"].append(w["word"])
                 groups[-1]["end"] = w["end"]
             else:
-                groups.append({"speaker": w["speaker"], "words": [w["word"]], "start": w["start"], "end": w["end"]})
+                groups.append({"words": [w["word"]], "start": w["start"], "end": w["end"]})
 
         for g in groups:
             seg_text = " ".join(g["words"])
             if seg_text.strip():
-                store.add_segment(start=batch_offset + g["start"], end=batch_offset + g["end"], speaker=g["speaker"], text=seg_text)
+                store.add_segment(start=batch_offset + g["start"], end=batch_offset + g["end"], speaker=speaker, text=seg_text)
 
-    # Good: segment-level timestamps from verbose_json — align each sentence to a speaker
+    # Good: segment-level timestamps
     elif stt_segments:
-        groups: list[dict] = []
         for s in stt_segments:
-            mid = (s["start"] + s["end"]) / 2
-            speaker = _find_speaker(mid, diarization_segments, fallback_speaker)
             seg_text = s.get("text", "").strip()
-            if not seg_text:
-                continue
-            if groups and groups[-1]["speaker"] == speaker:
-                groups[-1]["text"] += " " + seg_text
-                groups[-1]["end"] = s["end"]
-            else:
-                groups.append({"speaker": speaker, "text": seg_text, "start": s["start"], "end": s["end"]})
+            if seg_text:
+                store.add_segment(start=batch_offset + s["start"], end=batch_offset + s["end"], speaker=speaker, text=seg_text)
 
-        for g in groups:
-            store.add_segment(start=batch_offset + g["start"], end=batch_offset + g["end"], speaker=g["speaker"], text=g["text"])
-
-    # Fallback: no timestamps — split text proportionally by segment duration
+    # Fallback: no timestamps
     else:
-        words = text.split()
-        total_words = len(words)
-        total_duration = sum(s["end"] - s["start"] for s in diarization_segments)
-        word_offset = 0
-
-        for i, seg in enumerate(diarization_segments):
-            if i == len(diarization_segments) - 1:
-                seg_words = words[word_offset:]
-            else:
-                proportion = (seg["end"] - seg["start"]) / total_duration if total_duration > 0 else 1 / len(diarization_segments)
-                count = max(1, round(total_words * proportion))
-                seg_words = words[word_offset:word_offset + count]
-                word_offset += count
-
-            seg_text = " ".join(seg_words)
-            if seg_text.strip():
-                store.add_segment(start=batch_offset + seg["start"], end=batch_offset + seg["end"], speaker=seg["speaker"], text=seg_text)
+        store.add_segment(start=batch_offset, end=batch_offset + 10.0, speaker=speaker, text=text)
 
 
 # ── Global Q&A across all meetings ───────────────────────────────────
@@ -696,7 +639,6 @@ async def create_session(req: CreateSessionRequest = CreateSessionRequest()):
         "record_mic": req.record_mic,
         "tags": req.tags,
         "store": TranscriptStore(),
-        "speaker_registry": SpeakerRegistry(),
         "summary": None,
         "batch_offset": 0.0,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -710,9 +652,8 @@ async def upload_audio_chunk(session_id: str, audio: UploadFile = File(...)):
     """Upload an audio chunk.
 
     The backend will:
-    1. Run local speaker diarization
-    2. Run STT (via PwC API)
-    3. Merge results into the transcript
+    1. Run STT (via PwC API)
+    2. Add results to the transcript
     """
     session = get_session(session_id)
     if session["status"] != "recording":
@@ -723,26 +664,17 @@ async def upload_audio_chunk(session_id: str, audio: UploadFile = File(...)):
     store: TranscriptStore = session["store"]
     batch_offset = session["batch_offset"]
 
-    # Run diarization and STT concurrently
-    diarization_segments, stt_result = await asyncio.gather(
-        asyncio.to_thread(diarize_audio, audio_bytes),
-        transcribe_audio(audio_bytes),
-    )
-    logger.info(f"Diarization: {len(diarization_segments)} segments")
+    stt_result = await transcribe_audio(audio_bytes)
     logger.info(f"STT result: '{stt_result['text'][:200]}', {len(stt_result.get('words', []))} words with timestamps")
 
-    # Merge diarization with transcription — align words to speakers by timestamp
-    _merge_diarization_and_text(
-        store, diarization_segments, stt_result, batch_offset,
-        speaker_registry=session["speaker_registry"],
-    )
+    _add_stt_to_store(store, stt_result, batch_offset)
 
     store.increment_batch()
     session["batch_offset"] += get_audio_duration(audio_bytes)
 
     return {
         "batch_index": store._batch_counter - 1,
-        "segments_added": len(diarization_segments) or 1,
+        "segments_added": 1,
         "transcript_preview": stt_result["text"][:200],
     }
 
@@ -908,16 +840,6 @@ async def finish_session(session_id: str, body: FinishRequest | None = None):
     notes = body.notes if body else ""
     logger.info(f"Finishing session {session_id} with notes: {notes[:200] if notes else '(none)'}")
 
-    # Re-diarize using full archival audio for consistent speaker labels
-    audio_path = get_audio_path(session_id)
-    if audio_path and store.segments:
-        try:
-            updated = await asyncio.to_thread(rediarize_full_audio, audio_path, store.segments)
-            store.segments = updated
-            logger.info("Re-diarization complete — speaker labels corrected")
-        except Exception as e:
-            logger.error(f"Re-diarization failed, keeping chunked results: {e}")
-
     summary = await store.generate_summary(notes=notes)
 
     session["summary"] = summary
@@ -1037,16 +959,10 @@ async def _process_system_audio(session_id: str):
         batch_offset = session["batch_offset"]
 
         try:
-            diarization_segments, stt_result = await asyncio.gather(
-                asyncio.to_thread(diarize_audio, audio_bytes),
-                transcribe_audio(audio_bytes),
-            )
+            stt_result = await transcribe_audio(audio_bytes)
             logger.info(f"System audio STT: '{stt_result['text'][:200]}'")
 
-            _merge_diarization_and_text(
-                store, diarization_segments, stt_result, batch_offset,
-                fallback_speaker="SYSTEM", speaker_registry=session["speaker_registry"],
-            )
+            _add_stt_to_store(store, stt_result, batch_offset, speaker="SYSTEM")
 
             store.increment_batch()
             session["batch_offset"] += get_audio_duration(audio_bytes)
