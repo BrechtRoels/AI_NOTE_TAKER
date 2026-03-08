@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+backend/venv/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Next.js build
+.next/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Binaries
+backend/bin/
+
+# Generated/user data
+backend/data/audio/
+backend/data/podcasts/
+backend/data/pdf/
+backend/data/mom/
+backend/data/meetings/
+backend/data/conversations/
+backend/data/settings.json
+backend/data/usage.json
+
+# IDE
+.vscode/
+.idea/

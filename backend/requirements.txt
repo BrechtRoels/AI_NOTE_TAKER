@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+websockets
+numpy
+torch
+torchaudio
+pyannote.audio
+pydub
+python-dotenv
+httpx
+scikit-learn
+sounddevice
