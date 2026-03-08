@@ -20,10 +20,11 @@ _MODELS_DIR = Path(__file__).parent / "models"
 _LOCAL_DIARIZATION = _MODELS_DIR / "pyannote-speaker-diarization-3.1" / "config.yaml"
 _LOCAL_SEGMENTATION = _MODELS_DIR / "pyannote-segmentation-3.0" / "pytorch_model.bin"
 _LOCAL_EMBEDDING = _MODELS_DIR / "pyannote-wespeaker-voxceleb-resnet34-LM" / "pytorch_model.bin"
+_LOCAL_PLDA = _MODELS_DIR / "pyannote-speaker-diarization-community-1" / "plda"
 
 
 def _has_local_models() -> bool:
-    return _LOCAL_DIARIZATION.exists() and _LOCAL_SEGMENTATION.exists() and _LOCAL_EMBEDDING.exists()
+    return _LOCAL_DIARIZATION.exists() and _LOCAL_SEGMENTATION.exists() and _LOCAL_EMBEDDING.exists() and _LOCAL_PLDA.exists()
 
 
 def get_pipeline() -> Pipeline:
@@ -42,6 +43,7 @@ def get_pipeline() -> Pipeline:
                         "embedding_exclude_overlap": True,
                         "segmentation": str(_LOCAL_SEGMENTATION.resolve()),
                         "segmentation_batch_size": 32,
+                        "plda": str(_LOCAL_PLDA.resolve()),
                     },
                 },
                 "params": {
