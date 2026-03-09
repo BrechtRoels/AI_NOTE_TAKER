@@ -21,10 +21,41 @@ def _params():
     return {"api-version": GENAI_API_VERSION} if GENAI_API_VERSION else {}
 
 
+def _detect_format(audio_bytes: bytes) -> tuple[str, str]:
+    """Detect audio format from magic bytes."""
+    if audio_bytes[:4] == b"RIFF":
+        return "audio.wav", "audio/wav"
+    return "audio.webm", "audio/webm"
+
+
+def _parse_response(resp: httpx.Response, audio_bytes: bytes) -> dict:
+    """Parse STT API response into standard format."""
+    content_type = resp.headers.get("content-type", "")
+    audio_seconds = len(audio_bytes) / 32000.0
+
+    if "application/json" in content_type:
+        data = resp.json()
+        if isinstance(data, str):
+            record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
+            return {"text": data, "segments": [], "words": []}
+        text = data.get("text", data.get("response", ""))
+        segments = data.get("segments", [])
+        words = data.get("words", [])
+        if data.get("duration"):
+            audio_seconds = float(data["duration"])
+        record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
+        return {"text": text, "segments": segments, "words": words}
+    else:
+        record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
+        return {"text": resp.text.strip(), "segments": [], "words": []}
+
+
 async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict:
     """Transcribe audio bytes to text using gpt-4o-mini-transcribe.
 
     Retries on transient errors with exponential backoff.
+    For large files (>1MB), uses sync httpx in a thread to avoid
+    asyncio transport buffer issues.
 
     Returns dict with:
         text: full transcription string
@@ -36,10 +67,16 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
 
     logger.info(f"STT request: {len(audio_bytes)} bytes, model={GENAI_STT_MODEL}")
 
+    # Large files use sync client in thread to avoid asyncio transport bugs
+    use_sync = len(audio_bytes) > 1_000_000
+
     last_error = None
     for attempt in range(MAX_RETRIES):
         try:
-            return await _do_transcribe(audio_bytes)
+            if use_sync:
+                return await asyncio.to_thread(_do_transcribe_sync, audio_bytes)
+            else:
+                return await _do_transcribe_async(audio_bytes)
         except (httpx.TimeoutException, httpx.ReadError, httpx.WriteError, httpx.ConnectError, OSError) as e:
             last_error = e
             if attempt < MAX_RETRIES - 1:
@@ -58,13 +95,34 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
     raise last_error
 
 
-async def _do_transcribe(audio_bytes: bytes) -> dict:
-    """Single attempt at transcription."""
-    # Detect format from magic bytes
-    if audio_bytes[:4] == b"RIFF":
-        fname, mime = "audio.wav", "audio/wav"
-    else:
-        fname, mime = "audio.webm", "audio/webm"
+def _do_transcribe_sync(audio_bytes: bytes) -> dict:
+    """Sync transcription — runs in thread pool for large files.
+
+    Bypasses asyncio's transport layer entirely, avoiding the
+    'assert self._buffer' bug with large multipart uploads.
+    """
+    fname, mime = _detect_format(audio_bytes)
+    logger.info(f"STT sync upload: {len(audio_bytes)} bytes as {fname}")
+
+    with httpx.Client(timeout=120) as client:
+        resp = client.post(
+            f"{GENAI_BASE_URL}/v1/audio/transcriptions",
+            params=_params(),
+            headers={"api-key": GENAI_API_KEY},
+            data={"model": GENAI_STT_MODEL},
+            files={"file": (fname, io.BytesIO(audio_bytes), mime)},
+        )
+
+        logger.info(f"STT response status: {resp.status_code}")
+        logger.info(f"STT response body: {resp.text[:500]}")
+        resp.raise_for_status()
+
+        return _parse_response(resp, audio_bytes)
+
+
+async def _do_transcribe_async(audio_bytes: bytes) -> dict:
+    """Async transcription — used for small chunks (<1MB)."""
+    fname, mime = _detect_format(audio_bytes)
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
@@ -79,23 +137,4 @@ async def _do_transcribe(audio_bytes: bytes) -> dict:
         logger.info(f"STT response body: {resp.text[:500]}")
         resp.raise_for_status()
 
-        content_type = resp.headers.get("content-type", "")
-
-        # Estimate audio duration from chunk size (~32kB/s for 16kHz 16-bit mono)
-        audio_seconds = len(audio_bytes) / 32000.0
-
-        if "application/json" in content_type:
-            data = resp.json()
-            if isinstance(data, str):
-                record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
-                return {"text": data, "segments": [], "words": []}
-            text = data.get("text", data.get("response", ""))
-            segments = data.get("segments", [])
-            words = data.get("words", [])
-            if data.get("duration"):
-                audio_seconds = float(data["duration"])
-            record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
-            return {"text": text, "segments": segments, "words": words}
-        else:
-            record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
-            return {"text": resp.text.strip(), "segments": [], "words": []}
+        return _parse_response(resp, audio_bytes)
