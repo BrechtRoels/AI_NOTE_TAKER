@@ -1035,13 +1035,25 @@ async function startBrowserRecorder() {
   recorder.start();
   recState.mediaRecorder = recorder;
 
-  // Archival recorder: runs continuously to save complete audio
+  // Archival recorder: streams audio chunks to server incrementally
   const archival = new MediaRecorder(destination.stream, {
     mimeType: "audio/webm;codecs=opus",
     audioBitsPerSecond: 16000,
   });
   recState.archivalChunks = [];
-  archival.ondataavailable = (e) => { if (e.data.size > 0) recState.archivalChunks.push(e.data); };
+  archival.ondataavailable = (e) => {
+    if (e.data.size > 0) {
+      recState.archivalChunks.push(e.data);
+      // Stream to server every 60s worth of chunks (every 2 chunks at 30s each)
+      if (recState.archivalChunks.length % 2 === 0 && recState.sessionId) {
+        const blob = new Blob(recState.archivalChunks, { type: "audio/webm" });
+        const form = new FormData();
+        form.append("audio", blob, "recording.webm");
+        fetch(`/api/sessions/${recState.sessionId}/upload-audio`, { method: "POST", body: form })
+          .catch(e => console.warn("Incremental audio save failed:", e));
+      }
+    }
+  };
   archival.start(30000); // buffer every 30s
   recState.archivalRecorder = archival;
 
@@ -1062,16 +1074,27 @@ async function startBrowserRecorder() {
 async function uploadChunk(blob) {
   if (!recState.sessionId) return;
   recState.pendingUploads++;
-  try {
-    const form = new FormData();
-    form.append("audio", blob, "chunk.webm");
-    await api(`/api/sessions/${recState.sessionId}/audio`, { method: "POST", body: form });
-    const data = await api(`/api/sessions/${recState.sessionId}/transcript`);
-    recState.segments = data.segments;
-    updateTranscriptUI();
-  } catch (e) {
-    if (!String(e).includes("not recording")) {
-      showToast(e.message, "error");
+  const maxRetries = 2;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const form = new FormData();
+      form.append("audio", blob, "chunk.webm");
+      await api(`/api/sessions/${recState.sessionId}/audio`, { method: "POST", body: form });
+      const data = await api(`/api/sessions/${recState.sessionId}/transcript`);
+      recState.segments = data.segments;
+      updateTranscriptUI();
+      break;
+    } catch (e) {
+      if (!String(e).includes("not recording")) {
+        if (attempt < maxRetries) {
+          console.warn(`Chunk upload attempt ${attempt + 1} failed, retrying...`);
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        } else {
+          showToast("Audio chunk failed to upload — transcript may have a gap", "error");
+        }
+      } else {
+        break;
+      }
     }
   }
   recState.pendingUploads--;

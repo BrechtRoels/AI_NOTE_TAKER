@@ -70,7 +70,7 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
 
 async def _do_transcribe(audio_bytes: bytes) -> dict:
     """Single attempt at transcription."""
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         # Try whisper with verbose_json for timestamped segments
         resp = await client.post(
             f"{GENAI_BASE_URL}/v1/audio/transcriptions",
