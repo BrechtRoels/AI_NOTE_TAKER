@@ -1030,7 +1030,10 @@ async function startBrowserRecorder() {
   recorder.onstop = () => {
     const blob = new Blob(chunks, { type: "audio/webm" });
     chunks = [];
-    if (blob.size > 0) uploadChunk(blob);
+    if (blob.size > 0) {
+      recState.pendingUploads++;  // increment synchronously so stopRecording waits
+      uploadChunk(blob, true);    // skipIncrement=true since we already incremented
+    }
   };
 
   recorder.start();
@@ -1078,9 +1081,9 @@ async function startBrowserRecorder() {
   }
 }
 
-async function uploadChunk(blob) {
+async function uploadChunk(blob, alreadyCounted = false) {
   if (!recState.sessionId) return;
-  recState.pendingUploads++;
+  if (!alreadyCounted) recState.pendingUploads++;
   const maxRetries = 2;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
