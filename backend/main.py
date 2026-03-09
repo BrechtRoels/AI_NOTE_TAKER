@@ -993,9 +993,12 @@ async def retranscribe_meeting(meeting_id: str):
     with open(audio_path, "rb") as f:
         full_audio_bytes = f.read()
 
-    # Split into 5-minute chunks using pydub
+    # Split into 5-minute chunks using pydub, downsampled for STT
     from pydub import AudioSegment
     audio = AudioSegment.from_file(io.BytesIO(full_audio_bytes))
+    # Downsample to mono 16kHz 16-bit — STT doesn't need more, and it
+    # reduces chunk size from ~55MB to ~10MB per 5 minutes
+    audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
     chunk_ms = 5 * 60 * 1000  # 5 minutes
     total_ms = len(audio)
 
@@ -1006,7 +1009,7 @@ async def retranscribe_meeting(meeting_id: str):
         end_ms = min(start_ms + chunk_ms, total_ms)
         chunk = audio[start_ms:end_ms]
 
-        # Export chunk as wav for STT (universally supported, no codec issues)
+        # Export as wav (universally supported, no codec issues)
         buf = io.BytesIO()
         chunk.export(buf, format="wav")
         chunk_bytes = buf.getvalue()
