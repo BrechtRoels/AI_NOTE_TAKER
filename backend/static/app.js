@@ -803,6 +803,7 @@ function resetRecState() {
     devices: [], tags: [], tagInput: "", existingTags: [], sessionId: null, status: "idle", segments: [], notes: [], qa: [], summary: null,
     suggestions: [], suggestionsLoading: false, suggestionsInterval: null, suggestionsTimeout: null,
     error: null, askBusy: false, mediaRecorder: null, archivalRecorder: null, archivalChunks: [],
+    archivalSaving: false, archivalSaveInterval: null,
     streams: [], audioCtx: null,
     chunkInterval: null, pendingUploads: 0, pollInterval: null, timerInterval: null, startTime: null,
   };
@@ -1035,27 +1036,33 @@ async function startBrowserRecorder() {
   recorder.start();
   recState.mediaRecorder = recorder;
 
-  // Archival recorder: streams audio chunks to server incrementally
+  // Archival recorder: saves complete audio periodically as a safety net
   const archival = new MediaRecorder(destination.stream, {
     mimeType: "audio/webm;codecs=opus",
     audioBitsPerSecond: 16000,
   });
   recState.archivalChunks = [];
+  recState.archivalSaving = false;
   archival.ondataavailable = (e) => {
-    if (e.data.size > 0) {
-      recState.archivalChunks.push(e.data);
-      // Stream to server every 60s worth of chunks (every 2 chunks at 30s each)
-      if (recState.archivalChunks.length % 2 === 0 && recState.sessionId) {
-        const blob = new Blob(recState.archivalChunks, { type: "audio/webm" });
-        const form = new FormData();
-        form.append("audio", blob, "recording.webm");
-        fetch(`/api/sessions/${recState.sessionId}/upload-audio`, { method: "POST", body: form })
-          .catch(e => console.warn("Incremental audio save failed:", e));
-      }
-    }
+    if (e.data.size > 0) recState.archivalChunks.push(e.data);
   };
   archival.start(30000); // buffer every 30s
   recState.archivalRecorder = archival;
+
+  // Save audio to server every 5 minutes (matches STT chunk interval)
+  recState.archivalSaveInterval = setInterval(async () => {
+    if (recState.archivalSaving || !recState.sessionId || recState.archivalChunks.length === 0) return;
+    recState.archivalSaving = true;
+    try {
+      const blob = new Blob(recState.archivalChunks, { type: "audio/webm" });
+      const form = new FormData();
+      form.append("audio", blob, "recording.webm");
+      await fetch(`/api/sessions/${recState.sessionId}/upload-audio`, { method: "POST", body: form });
+    } catch (e) {
+      console.warn("Periodic audio save failed:", e);
+    }
+    recState.archivalSaving = false;
+  }, 300000);
 
   recState.chunkInterval = setInterval(() => {
     if (recorder.state === "recording") {
@@ -1101,8 +1108,9 @@ async function uploadChunk(blob) {
 }
 
 async function stopRecording() {
-  // Stop all recorders immediately
+  // Stop all recorders and intervals immediately
   if (recState.chunkInterval) { clearInterval(recState.chunkInterval); recState.chunkInterval = null; }
+  if (recState.archivalSaveInterval) { clearInterval(recState.archivalSaveInterval); recState.archivalSaveInterval = null; }
   if (recState.mediaRecorder && recState.mediaRecorder.state !== "inactive") recState.mediaRecorder.stop();
   if (recState.archivalRecorder && recState.archivalRecorder.state !== "inactive") {
     recState.archivalRecorder.stop();
