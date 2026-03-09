@@ -70,7 +70,7 @@ async def llm_complete(prompt: str, model: str | None = None) -> str:
                 )
 
                 return _extract_text(data)
-        except (httpx.TimeoutException, httpx.ReadError, httpx.ConnectError) as e:
+        except (httpx.TimeoutException, httpx.ReadError, httpx.WriteError, httpx.ConnectError, OSError) as e:
             last_error = e
             if attempt < MAX_RETRIES - 1:
                 wait = RETRY_BACKOFF[attempt]

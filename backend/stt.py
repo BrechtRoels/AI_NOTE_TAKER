@@ -40,7 +40,7 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
     for attempt in range(MAX_RETRIES):
         try:
             return await _do_transcribe(audio_bytes)
-        except (httpx.TimeoutException, httpx.ReadError, httpx.ConnectError) as e:
+        except (httpx.TimeoutException, httpx.ReadError, httpx.WriteError, httpx.ConnectError, OSError) as e:
             last_error = e
             if attempt < MAX_RETRIES - 1:
                 wait = RETRY_BACKOFF[attempt]
