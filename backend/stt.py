@@ -1,11 +1,7 @@
 """Speech-to-Text via PwC GenAI Shared Service API.
 
-Uses OpenAI-compatible audio transcription endpoint with models:
-- openai.gpt-4o-mini-transcribe
-- whisper
-
-whisper supports verbose_json with segment timestamps, which enables
-accurate speaker-to-text alignment with diarization.
+Uses OpenAI-compatible audio transcription endpoint with model:
+- openai.gpt-4o-mini-transcribe (default, configurable via GENAI_STT_MODEL)
 """
 
 import io
@@ -25,15 +21,9 @@ def _params():
     return {"api-version": GENAI_API_VERSION} if GENAI_API_VERSION else {}
 
 
-# whisper supports verbose_json; gpt-4o-mini-transcribe does not
-WHISPER_MODEL = "whisper"
-
-
 async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict:
-    """Transcribe audio bytes to text with segment-level timestamps.
+    """Transcribe audio bytes to text using gpt-4o-mini-transcribe.
 
-    Uses whisper with verbose_json to get timestamped segments.
-    Falls back to configured model without timestamps if that fails.
     Retries on transient errors with exponential backoff.
 
     Returns dict with:
@@ -44,7 +34,7 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
     if USE_MOCK_AI:
         return {"text": "[Mock transcription of audio segment]", "segments": [], "words": []}
 
-    logger.info(f"STT request: {len(audio_bytes)} bytes")
+    logger.info(f"STT request: {len(audio_bytes)} bytes, model={GENAI_STT_MODEL}")
 
     last_error = None
     for attempt in range(MAX_RETRIES):
@@ -71,27 +61,13 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
 async def _do_transcribe(audio_bytes: bytes) -> dict:
     """Single attempt at transcription."""
     async with httpx.AsyncClient(timeout=120) as client:
-        # Try whisper with verbose_json for timestamped segments
         resp = await client.post(
             f"{GENAI_BASE_URL}/v1/audio/transcriptions",
             params=_params(),
             headers={"api-key": GENAI_API_KEY},
-            data={
-                "model": WHISPER_MODEL,
-                "response_format": "verbose_json",
-            },
+            data={"model": GENAI_STT_MODEL},
             files={"file": ("audio.webm", io.BytesIO(audio_bytes), "audio/webm")},
         )
-
-        if resp.status_code != 200:
-            logger.info(f"whisper verbose_json failed ({resp.status_code}: {resp.text[:200]}), falling back to {GENAI_STT_MODEL}")
-            resp = await client.post(
-                f"{GENAI_BASE_URL}/v1/audio/transcriptions",
-                params=_params(),
-                headers={"api-key": GENAI_API_KEY},
-                data={"model": GENAI_STT_MODEL},
-                files={"file": ("audio.webm", io.BytesIO(audio_bytes), "audio/webm")},
-            )
 
         logger.info(f"STT response status: {resp.status_code}")
         logger.info(f"STT response body: {resp.text[:500]}")
@@ -105,16 +81,15 @@ async def _do_transcribe(audio_bytes: bytes) -> dict:
         if "application/json" in content_type:
             data = resp.json()
             if isinstance(data, str):
-                record_usage(model=WHISPER_MODEL, audio_seconds=audio_seconds)
+                record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
                 return {"text": data, "segments": [], "words": []}
             text = data.get("text", data.get("response", ""))
             segments = data.get("segments", [])
             words = data.get("words", [])
-            # Use duration from response if available
             if data.get("duration"):
                 audio_seconds = float(data["duration"])
-            record_usage(model=WHISPER_MODEL, audio_seconds=audio_seconds)
+            record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
             return {"text": text, "segments": segments, "words": words}
         else:
-            record_usage(model=WHISPER_MODEL, audio_seconds=audio_seconds)
+            record_usage(model=GENAI_STT_MODEL, audio_seconds=audio_seconds)
             return {"text": resp.text.strip(), "segments": [], "words": []}
