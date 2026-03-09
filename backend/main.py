@@ -1006,9 +1006,9 @@ async def retranscribe_meeting(meeting_id: str):
         end_ms = min(start_ms + chunk_ms, total_ms)
         chunk = audio[start_ms:end_ms]
 
-        # Export chunk to webm/ogg bytes for STT
+        # Export chunk as wav for STT (universally supported, no codec issues)
         buf = io.BytesIO()
-        chunk.export(buf, format="ogg", codec="opus")
+        chunk.export(buf, format="wav")
         chunk_bytes = buf.getvalue()
 
         batch_offset = start_ms / 1000.0

@@ -60,13 +60,19 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
 
 async def _do_transcribe(audio_bytes: bytes) -> dict:
     """Single attempt at transcription."""
+    # Detect format from magic bytes
+    if audio_bytes[:4] == b"RIFF":
+        fname, mime = "audio.wav", "audio/wav"
+    else:
+        fname, mime = "audio.webm", "audio/webm"
+
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
             f"{GENAI_BASE_URL}/v1/audio/transcriptions",
             params=_params(),
             headers={"api-key": GENAI_API_KEY},
             data={"model": GENAI_STT_MODEL},
-            files={"file": ("audio.webm", io.BytesIO(audio_bytes), "audio/webm")},
+            files={"file": (fname, io.BytesIO(audio_bytes), mime)},
         )
 
         logger.info(f"STT response status: {resp.status_code}")
