@@ -978,17 +978,7 @@ async function startRecording(app) {
       }
     }
 
-    // Poll transcript for system audio updates
-    if (recState.sysAudio) {
-      recState.pollInterval = setInterval(async () => {
-        if (recState.status !== "recording") return;
-        try {
-          const data = await api(`/api/sessions/${recState.sessionId}/transcript`);
-          recState.segments = data.segments;
-          updateTranscriptUI();
-        } catch {}
-      }, 5000);
-    }
+    // No live transcript polling — transcripts are processed in 5-min chunks
 
     // Live suggestions: first fetch after 60s, then every 2 min
     if (recState.tags.length > 0) {
@@ -1060,7 +1050,7 @@ async function startBrowserRecorder() {
       recorder.stop();
       recorder.start();
     }
-  }, 10000);
+  }, 300000); // 5 minutes
 
   // Stop if screen share ends
   if (recState.screen && recState.streams[0]) {
@@ -1088,50 +1078,50 @@ async function uploadChunk(blob) {
 }
 
 async function stopRecording() {
-  // Stop browser recorder
+  // Stop all recorders immediately
   if (recState.chunkInterval) { clearInterval(recState.chunkInterval); recState.chunkInterval = null; }
   if (recState.mediaRecorder && recState.mediaRecorder.state !== "inactive") recState.mediaRecorder.stop();
-
-  // Stop archival recorder and upload complete audio
   if (recState.archivalRecorder && recState.archivalRecorder.state !== "inactive") {
     recState.archivalRecorder.stop();
   }
-  // Brief wait for final ondataavailable
-  await new Promise(r => setTimeout(r, 300));
+  await new Promise(r => setTimeout(r, 300)); // wait for final ondataavailable
 
+  // Stop all audio streams
   recState.streams.forEach(s => s.getTracks().forEach(t => t.stop()));
   recState.streams = [];
   if (recState.audioCtx) { try { recState.audioCtx.close(); } catch {} recState.audioCtx = null; }
+
+  // Stop system audio
+  if (recState.sysAudio && recState.sessionId) {
+    try { await api(`/api/sessions/${recState.sessionId}/stop-system-capture`, { method: "POST" }); } catch {}
+  }
 
   recState.status = "processing";
   if (recState.timerInterval) { clearInterval(recState.timerInterval); recState.timerInterval = null; }
   if (recState.suggestionsInterval) { clearInterval(recState.suggestionsInterval); recState.suggestionsInterval = null; }
   if (recState.suggestionsTimeout) { clearTimeout(recState.suggestionsTimeout); recState.suggestionsTimeout = null; }
   updateRecHeaderUI();
+  showToast("Saving audio and processing transcript...", "info", 8000);
 
-  // Stop system audio
-  if (recState.sysAudio && recState.sessionId) {
-    try { await api(`/api/sessions/${recState.sessionId}/stop-system-capture`, { method: "POST" }); } catch {}
-  }
-  if (recState.pollInterval) { clearInterval(recState.pollInterval); recState.pollInterval = null; }
-
-  // Upload complete archival audio
+  // Save complete audio FIRST
   if (recState.archivalChunks.length > 0 && recState.sessionId) {
     const fullBlob = new Blob(recState.archivalChunks, { type: "audio/webm" });
     const form = new FormData();
     form.append("audio", fullBlob, "recording.webm");
     try {
       await fetch(`/api/sessions/${recState.sessionId}/upload-audio`, { method: "POST", body: form });
+      showToast("Audio saved successfully", "success");
     } catch (e) {
       console.error("Failed to upload audio:", e);
+      showToast("Failed to save audio", "error");
     }
   }
   recState.archivalChunks = [];
 
-  // Wait for pending uploads
+  // Wait for any pending STT chunk uploads
   while (recState.pendingUploads > 0) await new Promise(r => setTimeout(r, 200));
 
-  // Finish session
+  // Finish session (generates summary)
   try {
     const notes = recState.notes.map(n => `[${fmtTime(n.time)}] ${n.text}`).join("\n");
     const result = await api(`/api/sessions/${recState.sessionId}/finish`, {
@@ -1241,7 +1231,7 @@ function renderActiveRecording(app) {
       <section class="rec-transcript">
         <h2 class="section-title">Transcript</h2>
         <div id="transcriptArea">
-          <p class="empty-transcript">Transcript will appear here once recording starts...</p>
+          <p class="empty-transcript">Transcript is processed in 5-minute chunks to reduce API load. The full transcript will be available when the recording is finished.</p>
         </div>
         <div id="scrollAnchor"></div>
       </section>

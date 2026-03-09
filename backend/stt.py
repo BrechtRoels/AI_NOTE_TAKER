@@ -10,11 +10,15 @@ accurate speaker-to-text alignment with diarization.
 
 import io
 import logging
+import asyncio
 import httpx
 from config import GENAI_BASE_URL, GENAI_API_KEY, GENAI_API_VERSION, GENAI_STT_MODEL, USE_MOCK_AI
 from usage import record_usage
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_BACKOFF = [1, 3, 8]  # seconds between retries
 
 
 def _params():
@@ -30,6 +34,7 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
 
     Uses whisper with verbose_json to get timestamped segments.
     Falls back to configured model without timestamps if that fails.
+    Retries on transient errors with exponential backoff.
 
     Returns dict with:
         text: full transcription string
@@ -41,6 +46,30 @@ async def transcribe_audio(audio_bytes: bytes, sample_rate: int = 16000) -> dict
 
     logger.info(f"STT request: {len(audio_bytes)} bytes")
 
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await _do_transcribe(audio_bytes)
+        except (httpx.TimeoutException, httpx.ReadError, httpx.ConnectError) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF[attempt]
+                logger.warning(f"STT attempt {attempt + 1} failed ({type(e).__name__}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code >= 500:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF[attempt]
+                    logger.warning(f"STT attempt {attempt + 1} got {e.response.status_code}, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+            else:
+                raise
+    raise last_error
+
+
+async def _do_transcribe(audio_bytes: bytes) -> dict:
+    """Single attempt at transcription."""
     async with httpx.AsyncClient(timeout=60) as client:
         # Try whisper with verbose_json for timestamped segments
         resp = await client.post(

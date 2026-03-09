@@ -1,4 +1,6 @@
 import json
+import asyncio
+import logging
 import httpx
 import numpy as np
 from collections.abc import AsyncIterator
@@ -6,6 +8,11 @@ from config import (
     GENAI_BASE_URL, GENAI_API_KEY, GENAI_API_VERSION,
     GENAI_LLM_MODEL, GENAI_EMBEDDINGS_MODEL, USE_MOCK_AI,
 )
+
+logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+RETRY_BACKOFF = [1, 3, 8]
 
 
 def _params():
@@ -36,30 +43,49 @@ def _extract_text(data: dict) -> str:
 
 
 async def llm_complete(prompt: str, model: str | None = None) -> str:
+    """Complete a prompt with retry on transient errors."""
     if USE_MOCK_AI:
         return f"[Mock response for: {prompt[:80]}...]"
 
     model = model or GENAI_LLM_MODEL
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(
-            f"{GENAI_BASE_URL}/v1/responses",
-            params=_params(),
-            headers=_headers(),
-            json={"model": model, "input": prompt},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    f"{GENAI_BASE_URL}/v1/responses",
+                    params=_params(),
+                    headers=_headers(),
+                    json={"model": model, "input": prompt},
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-        # Track usage
-        usage = data.get("usage", {})
-        record_usage(
-            model=model,
-            prompt_tokens=usage.get("prompt_tokens", usage.get("input_tokens", 0)),
-            completion_tokens=usage.get("completion_tokens", usage.get("output_tokens", 0)),
-            total_tokens=usage.get("total_tokens", 0),
-        )
+                usage = data.get("usage", {})
+                record_usage(
+                    model=model,
+                    prompt_tokens=usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+                    completion_tokens=usage.get("completion_tokens", usage.get("output_tokens", 0)),
+                    total_tokens=usage.get("total_tokens", 0),
+                )
 
-        return _extract_text(data)
+                return _extract_text(data)
+        except (httpx.TimeoutException, httpx.ReadError, httpx.ConnectError) as e:
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                wait = RETRY_BACKOFF[attempt]
+                logger.warning(f"LLM attempt {attempt + 1} failed ({type(e).__name__}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code >= 500:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF[attempt]
+                    logger.warning(f"LLM attempt {attempt + 1} got {e.response.status_code}, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+            else:
+                raise
+    raise last_error
 
 
 async def llm_stream(prompt: str, model: str | None = None) -> AsyncIterator[str]:

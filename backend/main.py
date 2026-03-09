@@ -45,6 +45,8 @@ from mom_generator import generate_mom
 sessions: dict[str, dict] = {}
 _audio_capture: SystemAudioCapture | None = None
 
+SESSION_MAX_AGE_HOURS = 12  # clean up sessions older than this
+
 
 def get_session(session_id: str) -> dict:
     if session_id not in sessions:
@@ -52,11 +54,44 @@ def get_session(session_id: str) -> dict:
     return sessions[session_id]
 
 
+async def _cleanup_stale_sessions():
+    """Periodically remove sessions that are too old or stuck in processing."""
+    while True:
+        await asyncio.sleep(600)  # check every 10 minutes
+        now = datetime.now(timezone.utc)
+        to_remove = []
+        for sid, sess in sessions.items():
+            created = datetime.fromisoformat(sess["created_at"])
+            age_hours = (now - created).total_seconds() / 3600
+
+            # Remove finished sessions older than max age
+            if sess["status"] == "finished" and age_hours > SESSION_MAX_AGE_HOURS:
+                to_remove.append(sid)
+            # Recover sessions stuck in "processing" for more than 10 minutes
+            elif sess["status"] == "processing" and age_hours > 0.167:
+                logger.warning(f"Session {sid} stuck in processing, marking as finished")
+                sess["status"] = "finished"
+                if not sess.get("summary"):
+                    sess["summary"] = {"summary": "Session recovered after processing timeout.", "action_items": [], "decisions": []}
+            # Remove abandoned recording sessions older than max age
+            elif sess["status"] == "recording" and age_hours > SESSION_MAX_AGE_HOURS:
+                to_remove.append(sid)
+
+        for sid in to_remove:
+            logger.info(f"Cleaning up stale session {sid}")
+            del sessions[sid]
+
+        if to_remove:
+            logger.info(f"Cleaned up {len(to_remove)} stale sessions, {len(sessions)} remaining")
+
+
 # ── App ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_cleanup_stale_sessions())
     yield
+    task.cancel()
 
 app = FastAPI(title="AI Note Taker", lifespan=lifespan)
 
@@ -664,7 +699,19 @@ async def upload_audio_chunk(session_id: str, audio: UploadFile = File(...)):
     store: TranscriptStore = session["store"]
     batch_offset = session["batch_offset"]
 
-    stt_result = await transcribe_audio(audio_bytes)
+    try:
+        stt_result = await transcribe_audio(audio_bytes)
+    except Exception as e:
+        logger.error(f"STT failed for session {session_id}: {e}")
+        # Still update offset so next chunk aligns, but skip transcript
+        session["batch_offset"] += get_audio_duration(audio_bytes)
+        return {
+            "batch_index": store._batch_counter,
+            "segments_added": 0,
+            "transcript_preview": "",
+            "error": f"Transcription failed: {type(e).__name__}",
+        }
+
     logger.info(f"STT result: '{stt_result['text'][:200]}', {len(stt_result.get('words', []))} words with timestamps")
 
     _add_stt_to_store(store, stt_result, batch_offset)
@@ -830,6 +877,9 @@ class FinishRequest(BaseModel):
     notes: str = ""
 
 
+SUMMARY_TIMEOUT = 180  # 3 minutes max for summary generation
+
+
 @app.post("/api/sessions/{session_id}/finish")
 async def finish_session(session_id: str, body: FinishRequest | None = None):
     """End the recording session and generate summary."""
@@ -840,7 +890,17 @@ async def finish_session(session_id: str, body: FinishRequest | None = None):
     notes = body.notes if body else ""
     logger.info(f"Finishing session {session_id} with notes: {notes[:200] if notes else '(none)'}")
 
-    summary = await store.generate_summary(notes=notes)
+    try:
+        summary = await asyncio.wait_for(
+            store.generate_summary(notes=notes),
+            timeout=SUMMARY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"Summary generation timed out for session {session_id}")
+        summary = {"summary": "Summary generation timed out. You can regenerate from the meeting page.", "action_items": [], "decisions": []}
+    except Exception as e:
+        logger.error(f"Summary generation failed for session {session_id}: {e}")
+        summary = {"summary": f"Summary generation failed: {type(e).__name__}. You can regenerate from the meeting page.", "action_items": [], "decisions": []}
 
     session["summary"] = summary
     session["status"] = "finished"
