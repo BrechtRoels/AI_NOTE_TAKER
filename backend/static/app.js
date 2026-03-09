@@ -1520,6 +1520,25 @@ async function regenerateSummary(meetingId) {
   if (btn) { btn.disabled = false; btn.innerHTML = `${ICONS.refreshCw} Regenerate Summary`; }
 }
 
+async function retranscribeMeeting(meetingId) {
+  const btn = document.getElementById("btnRetranscribe");
+  if (btn) { btn.disabled = true; btn.innerHTML = `${ICONS.loader} Re-transcribing...`; }
+  showToast("Re-transcribing from saved audio — this may take a few minutes...", "info", 10000);
+  try {
+    const res = await fetch(`/api/meetings/${meetingId}/retranscribe`, { method: "POST" });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(errText);
+    }
+    const data = await res.json();
+    showToast(`Re-transcription complete: ${data.total_segments} segments`, "success");
+    navigate(`/meetings/${meetingId}`);
+  } catch (e) {
+    showToast("Re-transcription failed: " + e.message, "error");
+    if (btn) { btn.disabled = false; btn.innerHTML = `${ICONS.refreshCw} Re-transcribe Audio`; }
+  }
+}
+
 // ── Audio Player ─────────────────────────────────────────────────
 
 let _audioSegments = []; // meeting segments for highlight sync
@@ -1687,6 +1706,9 @@ async function renderMeetingDetail(app, id) {
               </div>
             </div>
           </div>
+          <button class="btn-secondary" id="btnRetranscribe" onclick="retranscribeMeeting('${id}')">
+            ${ICONS.refreshCw} Re-transcribe Audio
+          </button>
           <button class="btn-secondary" id="btnRegenerate" onclick="regenerateSummary('${id}')">
             ${ICONS.refreshCw} Regenerate Summary
           </button>

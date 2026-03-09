@@ -16,6 +16,7 @@ Endpoints:
     POST /api/meetings/{id}/regenerate  — Regenerate summary for a past meeting
 """
 
+import io
 import uuid
 import asyncio
 import logging
@@ -970,6 +971,90 @@ async def regenerate_summary(meeting_id: str):
         sessions[meeting_id]["summary"] = summary
 
     return {"session_id": meeting_id, "summary": summary}
+
+
+@app.post("/api/meetings/{meeting_id}/retranscribe")
+async def retranscribe_meeting(meeting_id: str):
+    """Re-transcribe a meeting from its saved audio file.
+
+    Splits the audio into 5-minute chunks, runs STT on each,
+    rebuilds the transcript, and regenerates the summary.
+    """
+    data = load_meeting(meeting_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    audio_path = get_audio_path(meeting_id)
+    if not audio_path:
+        raise HTTPException(status_code=400, detail="No audio file saved for this meeting")
+
+    logger.info(f"Retranscribing meeting {meeting_id} from {audio_path}")
+
+    with open(audio_path, "rb") as f:
+        full_audio_bytes = f.read()
+
+    # Split into 5-minute chunks using pydub
+    from pydub import AudioSegment
+    audio = AudioSegment.from_file(io.BytesIO(full_audio_bytes))
+    chunk_ms = 5 * 60 * 1000  # 5 minutes
+    total_ms = len(audio)
+
+    store = TranscriptStore()
+    chunk_idx = 0
+
+    for start_ms in range(0, total_ms, chunk_ms):
+        end_ms = min(start_ms + chunk_ms, total_ms)
+        chunk = audio[start_ms:end_ms]
+
+        # Export chunk to webm/ogg bytes for STT
+        buf = io.BytesIO()
+        chunk.export(buf, format="ogg", codec="opus")
+        chunk_bytes = buf.getvalue()
+
+        batch_offset = start_ms / 1000.0
+        logger.info(f"Retranscribe chunk {chunk_idx}: {start_ms / 1000:.0f}s - {end_ms / 1000:.0f}s ({len(chunk_bytes)} bytes)")
+
+        try:
+            stt_result = await transcribe_audio(chunk_bytes)
+            _add_stt_to_store(store, stt_result, batch_offset)
+        except Exception as e:
+            logger.error(f"STT failed for chunk {chunk_idx}: {e}")
+            store.add_segment(
+                start=batch_offset,
+                end=end_ms / 1000.0,
+                speaker="Speaker",
+                text=f"[Transcription failed for this segment: {type(e).__name__}]",
+            )
+
+        store.increment_batch()
+        chunk_idx += 1
+
+    # Regenerate summary
+    notes = data.get("notes", "")
+    try:
+        summary = await asyncio.wait_for(
+            store.generate_summary(notes=notes),
+            timeout=SUMMARY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        summary = {"summary": "Summary generation timed out. You can regenerate from the meeting page.", "action_items": [], "decisions": []}
+    except Exception as e:
+        summary = {"summary": f"Summary generation failed: {type(e).__name__}.", "action_items": [], "decisions": []}
+
+    # Save updated meeting
+    data["segments"] = store.segments
+    data["transcript"] = store.get_full_transcript()
+    data["total_segments"] = len(store.segments)
+    data["summary"] = summary
+    save_meeting(meeting_id, data)
+
+    logger.info(f"Retranscription complete: {len(store.segments)} segments")
+
+    return {
+        "meeting_id": meeting_id,
+        "total_segments": len(store.segments),
+        "summary": summary,
+    }
 
 
 # ── System audio capture endpoints ───────────────────────────────────
