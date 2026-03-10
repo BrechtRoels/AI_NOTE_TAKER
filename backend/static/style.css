@@ -759,6 +759,21 @@ a.seg-time:hover { color: var(--c-primary); }
   padding: 80px 0;
 }
 
+.pending-text {
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--c-fg2);
+  font-style: italic;
+  border-left: 3px solid var(--c-primary);
+  margin: 4px 0;
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
 /* ── Q&A Input ────────────────────────────────────────────────── */
 
 .qa-input-box {

@@ -786,6 +786,12 @@ let recState = {
   pollInterval: null,
   timerInterval: null,
   startTime: null,
+  // realtime mode
+  mode: "batch",           // "realtime" or "batch"
+  realtimeWs: null,        // WebSocket to backend
+  realtimeWorklet: null,   // AudioWorkletNode
+  realtimeFailed: false,   // set true if realtime disconnects mid-recording
+  pendingText: "",          // partial transcript from delta events
 };
 
 function resetRecState() {
@@ -798,6 +804,8 @@ function resetRecState() {
   recState.streams.forEach(s => s.getTracks().forEach(t => t.stop()));
   if (recState.audioCtx) { try { recState.audioCtx.close(); } catch {} }
 
+  if (recState.realtimeWs) { try { recState.realtimeWs.close(); } catch {} }
+
   recState = {
     configured: false, name: "", mic: true, screen: false, sysAudio: true, micId: "",
     devices: [], tags: [], tagInput: "", existingTags: [], sessionId: null, status: "idle", segments: [], notes: [], qa: [], summary: null,
@@ -806,6 +814,7 @@ function resetRecState() {
     archivalSaving: false, archivalSaveInterval: null,
     streams: [], audioCtx: null,
     chunkInterval: null, pendingUploads: 0, pollInterval: null, timerInterval: null, startTime: null,
+    mode: "batch", realtimeWs: null, realtimeWorklet: null, realtimeFailed: false, pendingText: "",
   };
 }
 
@@ -990,6 +999,8 @@ async function startRecording(app) {
     }
 
     renderActiveRecording(app);
+    updateRealtimeStatusUI();
+    updateTranscriptUI();
   } catch (e) {
     showToast(e.message, "error");
     renderSetupForm(app);
@@ -997,7 +1008,8 @@ async function startRecording(app) {
 }
 
 async function startBrowserRecorder() {
-  const audioCtx = new AudioContext({ sampleRate: 16000 });
+  // Use 24kHz for realtime API compatibility (also fine for batch)
+  const audioCtx = new AudioContext({ sampleRate: 24000 });
   recState.audioCtx = audioCtx;
   const destination = audioCtx.createMediaStreamDestination();
   let hasAudio = false;
@@ -1023,23 +1035,7 @@ async function startBrowserRecorder() {
 
   if (!hasAudio) throw new Error("No audio source available.");
 
-  const recorder = new MediaRecorder(destination.stream, { mimeType: "audio/webm;codecs=opus" });
-  let chunks = [];
-
-  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-  recorder.onstop = () => {
-    const blob = new Blob(chunks, { type: "audio/webm" });
-    chunks = [];
-    if (blob.size > 0) {
-      recState.pendingUploads++;  // increment synchronously so stopRecording waits
-      uploadChunk(blob, true);    // skipIncrement=true since we already incremented
-    }
-  };
-
-  recorder.start();
-  recState.mediaRecorder = recorder;
-
-  // Archival recorder: saves complete audio periodically as a safety net
+  // ── Archival recorder (always runs — safety net for fallback) ──
   const archival = new MediaRecorder(destination.stream, {
     mimeType: "audio/webm;codecs=opus",
     audioBitsPerSecond: 16000,
@@ -1052,7 +1048,7 @@ async function startBrowserRecorder() {
   archival.start(30000); // buffer every 30s
   recState.archivalRecorder = archival;
 
-  // Save audio to server every 5 minutes (matches STT chunk interval)
+  // Save audio to server every 5 minutes
   recState.archivalSaveInterval = setInterval(async () => {
     if (recState.archivalSaving || !recState.sessionId || recState.archivalChunks.length === 0) return;
     recState.archivalSaving = true;
@@ -1067,18 +1063,177 @@ async function startBrowserRecorder() {
     recState.archivalSaving = false;
   }, 300000);
 
-  recState.chunkInterval = setInterval(() => {
-    if (recorder.state === "recording") {
-      recorder.stop();
-      recorder.start();
+  // ── Try realtime mode first ────────────────────────────────────
+  try {
+    const ws = await connectRealtimeWs();
+    recState.realtimeWs = ws;
+    recState.mode = "realtime";
+
+    // Set up AudioWorklet for PCM streaming
+    await audioCtx.audioWorklet.addModule("/static/pcm-processor.js");
+    const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
+    recState.realtimeWorklet = workletNode;
+
+    // Connect all audio sources to the worklet
+    // (re-create sources since they're already connected to destination)
+    for (const stream of recState.streams) {
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length > 0) {
+        audioCtx.createMediaStreamSource(new MediaStream(audioTracks)).connect(workletNode);
+      }
     }
-  }, 300000); // 5 minutes
+
+    // Send PCM data from worklet to backend via WebSocket
+    workletNode.port.onmessage = (e) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(e.data); // binary ArrayBuffer
+      }
+    };
+
+    // Handle transcript events from backend
+    ws.onmessage = (e) => {
+      try {
+        const event = JSON.parse(e.data);
+        handleRealtimeEvent(event);
+      } catch {}
+    };
+
+    ws.onclose = () => {
+      if (recState.status === "recording" && !recState.realtimeFailed) {
+        recState.realtimeFailed = true;
+        showToast("Realtime transcription disconnected. Audio will be re-transcribed when you stop.", "error", 8000);
+        updateRealtimeStatusUI();
+      }
+    };
+
+    showToast("Live transcription active", "success", 3000);
+    updateRealtimeStatusUI();
+
+  } catch (e) {
+    // ── Fall back to batch mode ────────────────────────────────
+    console.warn("Realtime unavailable, using batch mode:", e);
+    recState.mode = "batch";
+    showToast("Using batch transcription (5-min chunks)", "info", 3000);
+
+    setupBatchRecorder(destination);
+  }
 
   // Stop if screen share ends
   if (recState.screen && recState.streams[0]) {
     const videoTrack = recState.streams[0].getVideoTracks()[0];
     if (videoTrack) videoTrack.onended = () => stopRecording();
   }
+}
+
+function connectRealtimeWs() {
+  return new Promise((resolve, reject) => {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${proto}//${location.host}/ws/${recState.sessionId}/realtime`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Realtime connection timeout"));
+    }, 10000);
+
+    ws.binaryType = "arraybuffer";
+
+    const origOnMessage = (e) => {
+      try {
+        const event = JSON.parse(e.data);
+        if (event.type === "realtime_connected") {
+          clearTimeout(timeout);
+          ws.onmessage = null; // clear setup handler
+          resolve(ws);
+        } else if (event.type === "error") {
+          clearTimeout(timeout);
+          ws.close();
+          reject(new Error(event.message || "Realtime error"));
+        }
+      } catch {}
+    };
+    ws.onmessage = origOnMessage;
+
+    ws.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error("WebSocket connection failed"));
+    };
+
+    ws.onclose = () => {
+      clearTimeout(timeout);
+      reject(new Error("WebSocket closed before ready"));
+    };
+  });
+}
+
+function handleRealtimeEvent(event) {
+  if (event.type === "final") {
+    // Add completed segment
+    const now = recState.startTime ? (Date.now() - recState.startTime) / 1000 : 0;
+    recState.segments.push({
+      start: Math.max(0, now - 5),
+      end: now,
+      speaker: "Speaker",
+      text: event.text,
+    });
+    recState.pendingText = "";
+    updateTranscriptUI();
+  } else if (event.type === "delta") {
+    // Partial transcript — show live
+    recState.pendingText += event.text;
+    updatePendingTextUI();
+  } else if (event.type === "speech_started") {
+    updatePendingTextUI("...");
+  } else if (event.type === "error") {
+    console.error("Realtime error:", event.message);
+  }
+}
+
+function updatePendingTextUI(override) {
+  const el = document.getElementById("pendingText");
+  if (!el) return;
+  const text = override || recState.pendingText;
+  el.textContent = text || "";
+  el.style.display = text ? "" : "none";
+  if (text) {
+    const anchor = document.getElementById("scrollAnchor");
+    if (anchor) anchor.scrollIntoView({ behavior: "smooth" });
+  }
+}
+
+function updateRealtimeStatusUI() {
+  const el = document.getElementById("realtimeStatus");
+  if (!el) return;
+  if (recState.mode === "realtime" && !recState.realtimeFailed) {
+    el.innerHTML = `<span style="color:var(--c-success);font-size:12px">● Live transcription</span>`;
+  } else if (recState.realtimeFailed) {
+    el.innerHTML = `<span style="color:var(--c-danger);font-size:12px">● Realtime disconnected — will re-transcribe on stop</span>`;
+  } else {
+    el.innerHTML = `<span style="color:var(--c-fg3);font-size:12px">● Batch mode (5-min chunks)</span>`;
+  }
+}
+
+function setupBatchRecorder(destination) {
+  const recorder = new MediaRecorder(destination.stream, { mimeType: "audio/webm;codecs=opus" });
+  let chunks = [];
+
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: "audio/webm" });
+    chunks = [];
+    if (blob.size > 0) {
+      recState.pendingUploads++;
+      uploadChunk(blob, true);
+    }
+  };
+
+  recorder.start();
+  recState.mediaRecorder = recorder;
+
+  recState.chunkInterval = setInterval(() => {
+    if (recorder.state === "recording") {
+      recorder.stop();
+      recorder.start();
+    }
+  }, 300000); // 5 minutes
 }
 
 async function uploadChunk(blob, alreadyCounted = false) {
@@ -1111,6 +1266,16 @@ async function uploadChunk(blob, alreadyCounted = false) {
 }
 
 async function stopRecording() {
+  // Stop realtime WebSocket and worklet
+  if (recState.realtimeWs) {
+    try { recState.realtimeWs.close(); } catch {}
+    recState.realtimeWs = null;
+  }
+  if (recState.realtimeWorklet) {
+    try { recState.realtimeWorklet.disconnect(); } catch {}
+    recState.realtimeWorklet = null;
+  }
+
   // Stop all recorders and intervals immediately
   if (recState.chunkInterval) { clearInterval(recState.chunkInterval); recState.chunkInterval = null; }
   if (recState.archivalSaveInterval) { clearInterval(recState.archivalSaveInterval); recState.archivalSaveInterval = null; }
@@ -1152,7 +1317,7 @@ async function stopRecording() {
   }
   recState.archivalChunks = [];
 
-  // Wait for any pending STT chunk uploads
+  // Wait for any pending STT chunk uploads (batch mode only)
   while (recState.pendingUploads > 0) await new Promise(r => setTimeout(r, 200));
 
   // Finish session (generates summary)
@@ -1172,6 +1337,23 @@ async function stopRecording() {
 
   updateRecHeaderUI();
   updateSummaryUI();
+
+  // ── Fallback: if realtime failed, re-transcribe from saved audio ──
+  if (recState.realtimeFailed && recState.sessionId) {
+    showToast("Re-transcribing from saved audio (realtime had failures)...", "info", 15000);
+    try {
+      const res = await fetch(`/api/meetings/${recState.sessionId}/retranscribe`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        showToast(`Re-transcription complete: ${data.total_segments} segments`, "success");
+        navigate(`/meetings/${recState.sessionId}`);
+      } else {
+        showToast("Re-transcription failed — you can retry from the meeting page", "error");
+      }
+    } catch (e) {
+      showToast("Re-transcription failed: " + e.message, "error");
+    }
+  }
 }
 
 // ── Meeting Notes ────────────────────────────────────────────────
@@ -1263,10 +1445,11 @@ function renderActiveRecording(app) {
 
     <div class="rec-body">
       <section class="rec-transcript">
-        <h2 class="section-title">Transcript</h2>
+        <h2 class="section-title">Transcript <span id="realtimeStatus"></span></h2>
         <div id="transcriptArea">
-          <p class="empty-transcript">Transcript is processed in 5-minute chunks to reduce API load. The full transcript will be available when the recording is finished.</p>
+          <p class="empty-transcript">Connecting to transcription service...</p>
         </div>
+        <div id="pendingText" class="pending-text" style="display:none"></div>
         <div id="scrollAnchor"></div>
       </section>
 
@@ -1312,7 +1495,10 @@ function updateTranscriptUI() {
   if (!area) return;
 
   if (recState.segments.length === 0) {
-    area.innerHTML = `<p class="empty-transcript">Transcript will appear here once recording starts...</p>`;
+    const msg = recState.mode === "realtime"
+      ? "Listening... transcript will appear as people speak."
+      : "Transcript is processed in 5-minute chunks. Text will appear after the first chunk.";
+    area.innerHTML = `<p class="empty-transcript">${msg}</p>`;
     return;
   }
 

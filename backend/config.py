@@ -15,6 +15,7 @@ GENAI_CHAT_MODEL = os.getenv("GENAI_CHAT_MODEL", "vertex_ai.gemini-2.0-flash")
 GENAI_EMBEDDINGS_MODEL = os.getenv("GENAI_EMBEDDINGS_MODEL", "azure.text-embedding-3-large")
 GENAI_EMBEDDINGS_DIMENSIONS = int(os.getenv("GENAI_EMBEDDINGS_DIMENSIONS", "1536"))
 GENAI_STT_MODEL = os.getenv("GENAI_STT_MODEL", "openai.gpt-4o-mini-transcribe")
+GENAI_REALTIME_MODEL = os.getenv("GENAI_REALTIME_MODEL", "openai.gpt-realtime-mini")
 USE_MOCK_AI = os.getenv("USE_MOCK_AI", "false").lower() == "true"
 HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN", "")
 USE_RERANK = os.getenv("USE_RERANK", "false").lower() == "true"

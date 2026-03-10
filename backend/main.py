@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -872,6 +872,93 @@ async def upload_complete_audio(session_id: str, audio: UploadFile = File(...)):
     save_audio(session_id, audio_bytes)
     logger.info(f"Saved complete audio: {len(audio_bytes)} bytes for session {session_id}")
     return {"status": "saved", "size": len(audio_bytes)}
+
+
+# ── Realtime WebSocket endpoint ──────────────────────────────────────
+
+@app.websocket("/ws/{session_id}/realtime")
+async def realtime_audio_ws(ws: WebSocket, session_id: str):
+    """WebSocket endpoint for realtime audio streaming.
+
+    Browser sends binary PCM16 frames. Backend relays them to the
+    PwC GenAI realtime API and forwards transcript events back.
+    """
+    await ws.accept()
+
+    if session_id not in sessions:
+        await ws.send_json({"type": "error", "message": "Session not found"})
+        await ws.close()
+        return
+
+    session = sessions[session_id]
+    store: TranscriptStore = session["store"]
+    session_start = datetime.fromisoformat(session["created_at"])
+
+    # Track speech timing for segment timestamps
+    speech_start_time: list[float | None] = [None]
+
+    def elapsed() -> float:
+        return (datetime.now(timezone.utc) - session_start).total_seconds()
+
+    async def on_transcript(event: dict):
+        """Handle transcript event from realtime API."""
+        etype = event.get("type")
+
+        if etype == "speech_started":
+            speech_start_time[0] = elapsed()
+
+        elif etype == "final":
+            text = event.get("text", "")
+            end_time = elapsed()
+            start_time = speech_start_time[0] if speech_start_time[0] is not None else max(0, end_time - 5.0)
+
+            store.add_segment(
+                start=start_time,
+                end=end_time,
+                speaker="Speaker",
+                text=text,
+            )
+            session["batch_offset"] = end_time
+            speech_start_time[0] = None
+
+        # Forward all events to browser
+        try:
+            await ws.send_json(event)
+        except Exception:
+            pass
+
+    async def on_error(msg: str):
+        """Handle error from realtime API — forward to browser."""
+        logger.error(f"Realtime STT error for session {session_id}: {msg}")
+        try:
+            await ws.send_json({"type": "error", "message": msg})
+        except Exception:
+            pass
+
+    from realtime_stt import RealtimeSTTClient
+    client = RealtimeSTTClient(on_transcript=on_transcript, on_error=on_error)
+
+    try:
+        await client.connect()
+        await ws.send_json({"type": "realtime_connected"})
+        logger.info(f"Realtime STT active for session {session_id}")
+
+        # Relay binary PCM audio from browser to PwC GenAI
+        while True:
+            data = await ws.receive_bytes()
+            if client.is_connected:
+                await client.send_audio(data)
+
+    except WebSocketDisconnect:
+        logger.info(f"Browser disconnected from realtime WS: {session_id}")
+    except Exception as e:
+        logger.error(f"Realtime WS error for session {session_id}: {e}")
+        try:
+            await ws.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        await client.close()
 
 
 class FinishRequest(BaseModel):
