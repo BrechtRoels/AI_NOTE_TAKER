@@ -745,6 +745,37 @@ a.seg-time:hover { color: var(--c-primary); }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0 4px;
+  transition: background 0.15s;
+}
+.seg-speaker:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.speaker-label-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: var(--c-surface);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+.speaker-chip {
+  background: transparent;
+  border: 1.5px solid;
+  border-radius: 16px;
+  padding: 2px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.speaker-chip:hover {
+  background: rgba(255,255,255,0.08);
 }
 
 .seg-text {

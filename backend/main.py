@@ -33,7 +33,11 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from transcript import TranscriptStore
-from diarization import get_audio_duration
+from diarization import (
+    get_audio_duration, diarize_audio,
+    get_speaker_embeddings_from_diarization, match_speakers_to_profiles,
+    save_speaker_profile, list_speaker_profiles, delete_speaker_profile,
+)
 from stt import transcribe_audio
 from storage import save_meeting, load_meeting, list_meetings, delete_meeting, load_all_meetings, rename_meeting, update_meeting_tags, save_audio, get_audio_path
 from config import AVAILABLE_MODELS, get_active_models, set_model
@@ -136,8 +140,13 @@ def _add_stt_to_store(
     stt_result: dict,
     batch_offset: float,
     speaker: str = "Speaker",
+    diarization_segments: list[dict] | None = None,
 ):
-    """Add STT output to the transcript store."""
+    """Add STT output to the transcript store.
+
+    If diarization_segments is provided, word/segment timestamps are
+    cross-referenced against diarization to assign speaker labels.
+    """
     text = stt_result.get("text", "")
     stt_segments = stt_result.get("segments", [])
     stt_words = stt_result.get("words", [])
@@ -145,27 +154,63 @@ def _add_stt_to_store(
     if not text.strip():
         return
 
+    def _speaker_at(time_sec: float) -> str:
+        """Look up speaker from diarization at a given time offset."""
+        if not diarization_segments:
+            return speaker
+        for d in diarization_segments:
+            if d["start"] <= time_sec <= d["end"]:
+                return d["speaker"]
+        # Find nearest diarization segment
+        best = speaker
+        best_dist = float("inf")
+        for d in diarization_segments:
+            dist = min(abs(d["start"] - time_sec), abs(d["end"] - time_sec))
+            if dist < best_dist:
+                best_dist = dist
+                best = d["speaker"]
+        return best
+
     # Best: word-level timestamps
     if stt_words:
         groups: list[dict] = []
         for w in stt_words:
-            if groups:
+            word_mid = (w["start"] + w["end"]) / 2 if "end" in w else w["start"]
+            word_speaker = _speaker_at(word_mid)
+
+            if groups and groups[-1]["speaker"] == word_speaker:
                 groups[-1]["words"].append(w["word"])
-                groups[-1]["end"] = w["end"]
+                groups[-1]["end"] = w.get("end", w["start"])
             else:
-                groups.append({"words": [w["word"]], "start": w["start"], "end": w["end"]})
+                groups.append({
+                    "words": [w["word"]],
+                    "start": w["start"],
+                    "end": w.get("end", w["start"]),
+                    "speaker": word_speaker,
+                })
 
         for g in groups:
             seg_text = " ".join(g["words"])
             if seg_text.strip():
-                store.add_segment(start=batch_offset + g["start"], end=batch_offset + g["end"], speaker=speaker, text=seg_text)
+                store.add_segment(
+                    start=batch_offset + g["start"],
+                    end=batch_offset + g["end"],
+                    speaker=g["speaker"],
+                    text=seg_text,
+                )
 
     # Good: segment-level timestamps
     elif stt_segments:
         for s in stt_segments:
             seg_text = s.get("text", "").strip()
             if seg_text:
-                store.add_segment(start=batch_offset + s["start"], end=batch_offset + s["end"], speaker=speaker, text=seg_text)
+                seg_mid = (s["start"] + s["end"]) / 2
+                store.add_segment(
+                    start=batch_offset + s["start"],
+                    end=batch_offset + s["end"],
+                    speaker=_speaker_at(seg_mid),
+                    text=seg_text,
+                )
 
     # Fallback: no timestamps
     else:
@@ -715,7 +760,15 @@ async def upload_audio_chunk(session_id: str, audio: UploadFile = File(...)):
 
     logger.info(f"STT result: '{stt_result['text'][:200]}', {len(stt_result.get('words', []))} words with timestamps")
 
-    _add_stt_to_store(store, stt_result, batch_offset)
+    # Run speaker diarization on the chunk
+    diar_segments = None
+    try:
+        diar_segments = await asyncio.to_thread(diarize_audio, audio_bytes)
+        logger.info(f"Diarization: {len(diar_segments)} speaker segments")
+    except Exception as e:
+        logger.warning(f"Diarization failed, using single speaker: {e}")
+
+    _add_stt_to_store(store, stt_result, batch_offset, diarization_segments=diar_segments)
 
     store.increment_batch()
     session["batch_offset"] += get_audio_duration(audio_bytes)
@@ -1089,6 +1142,31 @@ async def retranscribe_meeting(meeting_id: str):
     chunk_ms = 5 * 60 * 1000  # 5 minutes
     total_ms = len(audio)
 
+    # Run diarization on the full audio first for consistent speaker labels
+    logger.info("Running speaker diarization on full audio...")
+    full_diarization = None
+    speaker_mapping = {}
+    try:
+        buf = io.BytesIO()
+        audio.export(buf, format="wav")
+        full_audio_wav = buf.getvalue()
+        full_diarization = await asyncio.to_thread(diarize_audio, full_audio_wav)
+        logger.info(f"Diarization complete: {len(full_diarization)} segments")
+
+        # Try to match speakers to known profiles
+        speaker_embs = await asyncio.to_thread(
+            get_speaker_embeddings_from_diarization, full_audio_wav, full_diarization
+        )
+        speaker_mapping = match_speakers_to_profiles(speaker_embs)
+        if speaker_mapping:
+            logger.info(f"Speaker matches: {speaker_mapping}")
+            # Apply profile names to diarization
+            for seg in full_diarization:
+                if seg["speaker"] in speaker_mapping:
+                    seg["speaker"] = speaker_mapping[seg["speaker"]]
+    except Exception as e:
+        logger.warning(f"Diarization failed, using single speaker: {e}")
+
     store = TranscriptStore()
     chunk_idx = 0
 
@@ -1104,15 +1182,26 @@ async def retranscribe_meeting(meeting_id: str):
         batch_offset = start_ms / 1000.0
         logger.info(f"Retranscribe chunk {chunk_idx}: {start_ms / 1000:.0f}s - {end_ms / 1000:.0f}s ({len(chunk_bytes)} bytes)")
 
+        # Get diarization segments for this chunk's time range
+        chunk_diar = None
+        if full_diarization:
+            chunk_start = start_ms / 1000.0
+            chunk_end = end_ms / 1000.0
+            chunk_diar = [
+                {"start": max(0, d["start"] - chunk_start), "end": min(chunk_end - chunk_start, d["end"] - chunk_start), "speaker": d["speaker"]}
+                for d in full_diarization
+                if d["end"] > chunk_start and d["start"] < chunk_end
+            ]
+
         try:
             stt_result = await transcribe_audio(chunk_bytes)
-            _add_stt_to_store(store, stt_result, batch_offset)
+            _add_stt_to_store(store, stt_result, batch_offset, diarization_segments=chunk_diar)
         except Exception as e:
             logger.error(f"STT failed for chunk {chunk_idx}: {e}")
             store.add_segment(
                 start=batch_offset,
                 end=end_ms / 1000.0,
-                speaker="Speaker",
+                speaker="Speaker 1",
                 text=f"[Transcription failed for this segment: {type(e).__name__}]",
             )
 
@@ -1145,6 +1234,81 @@ async def retranscribe_meeting(meeting_id: str):
         "total_segments": len(store.segments),
         "summary": summary,
     }
+
+
+# ── Speaker profile endpoints ────────────────────────────────────────
+
+
+@app.get("/api/speakers")
+async def get_speakers():
+    """List all saved speaker profiles."""
+    return {"speakers": list_speaker_profiles()}
+
+
+@app.delete("/api/speakers/{name}")
+async def remove_speaker(name: str):
+    """Delete a speaker profile."""
+    if delete_speaker_profile(name):
+        return {"status": "deleted"}
+    raise HTTPException(status_code=404, detail="Speaker not found")
+
+
+class LabelSpeakerRequest(BaseModel):
+    meeting_id: str
+    old_label: str  # e.g. "Speaker 1"
+    new_name: str   # e.g. "Jan De Smedt"
+    save_profile: bool = True  # save voice profile for future matching
+
+
+@app.post("/api/speakers/label")
+async def label_speaker(req: LabelSpeakerRequest):
+    """Rename a speaker in a meeting and optionally save their voice profile.
+
+    This updates all transcript segments with the old label to the new name,
+    and extracts voice embeddings from the meeting audio to build a profile.
+    """
+    data = load_meeting(req.meeting_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    # Rename in segments
+    updated = 0
+    for seg in data.get("segments", []):
+        if seg.get("speaker") == req.old_label:
+            seg["speaker"] = req.new_name
+            updated += 1
+
+    if updated == 0:
+        raise HTTPException(status_code=400, detail=f"No segments found with speaker '{req.old_label}'")
+
+    # Rebuild transcript text
+    store = TranscriptStore()
+    for seg in data["segments"]:
+        store.add_segment(seg["start"], seg["end"], seg["speaker"], seg["text"])
+    data["transcript"] = store.get_full_transcript()
+
+    save_meeting(req.meeting_id, data)
+
+    # Save voice profile from the meeting's audio
+    if req.save_profile:
+        audio_path = get_audio_path(req.meeting_id)
+        if audio_path:
+            try:
+                with open(audio_path, "rb") as f:
+                    audio_bytes = f.read()
+                # Get segments for this speaker to extract embeddings
+                speaker_segs = [s for s in data["segments"] if s["speaker"] == req.new_name]
+                diar_segs = [{"start": s["start"], "end": s["end"], "speaker": req.new_name} for s in speaker_segs]
+                embs = await asyncio.to_thread(
+                    get_speaker_embeddings_from_diarization, audio_bytes, diar_segs
+                )
+                if req.new_name in embs:
+                    save_speaker_profile(req.new_name, embs[req.new_name].tolist())
+                    logger.info(f"Saved voice profile for '{req.new_name}'")
+            except Exception as e:
+                logger.warning(f"Could not save voice profile: {e}")
+
+    return {"status": "updated", "segments_renamed": updated}
 
 
 # ── System audio capture endpoints ───────────────────────────────────

@@ -1747,6 +1747,29 @@ function seekAudio(seconds) {
   } catch (e) { /* audio not ready */ }
 }
 
+async function renameSpeaker(oldLabel, meetingId) {
+  const newName = prompt(`Rename "${oldLabel}" to:`, oldLabel.startsWith("Speaker") ? "" : oldLabel);
+  if (!newName || newName === oldLabel) return;
+
+  try {
+    const res = await api("/api/speakers/label", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        meeting_id: meetingId,
+        old_label: oldLabel,
+        new_name: newName,
+        save_profile: true,
+      }),
+    });
+    showToast(`Renamed ${oldLabel} → ${newName} (${res.segments_renamed} segments). Voice profile saved.`, "success");
+    // Reload meeting detail
+    navigate(`/meetings/${meetingId}`);
+  } catch (e) {
+    showToast("Rename failed: " + e.message, "error");
+  }
+}
+
 function toggleAudioPlay() {
   const audio = document.getElementById("meetingAudio");
   if (!audio) return;
@@ -1978,10 +2001,19 @@ async function renderMeetingDetail(app, id) {
         if (m.segments.length === 0) {
           content.innerHTML = `<p class="empty-transcript">No transcript available.</p>`;
         } else {
-          content.innerHTML = `<div class="detail-transcript">${m.segments.map((seg, i) => `
+          // Get unique speakers for the rename UI
+          const speakers = [...new Set(m.segments.map(s => s.speaker))];
+          let speakerBar = "";
+          if (speakers.length > 1 || (speakers.length === 1 && speakers[0].startsWith("Speaker"))) {
+            speakerBar = `<div class="speaker-label-bar">
+              <span style="font-size:12px;color:var(--c-fg3)">Click a speaker name to rename:</span>
+              ${speakers.map(s => `<button class="speaker-chip" style="border-color:${spkColor(s)};color:${spkColor(s)}" onclick="renameSpeaker('${esc(s)}', '${esc(m.id)}')">${esc(s)}</button>`).join("")}
+            </div>`;
+          }
+          content.innerHTML = speakerBar + `<div class="detail-transcript">${m.segments.map((seg, i) => `
             <div class="segment-row" data-seg-idx="${i}" data-start="${seg.start}" data-end="${seg.end}">
               <a class="seg-time" href="javascript:void(0)" onclick="seekAudio(${seg.start})">${fmtTime(seg.start)}</a>
-              <span class="seg-speaker" style="color:${spkColor(seg.speaker)}">${esc(seg.speaker)}</span>
+              <span class="seg-speaker" style="color:${spkColor(seg.speaker)}" onclick="renameSpeaker('${esc(seg.speaker)}', '${esc(m.id)}')" title="Click to rename">${esc(seg.speaker)}</span>
               <span class="seg-text">${esc(seg.text)}</span>
             </div>`).join("")}</div>`;
         }
