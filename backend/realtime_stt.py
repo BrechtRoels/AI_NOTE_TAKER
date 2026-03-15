@@ -3,6 +3,9 @@
 Connects to the realtime WebSocket endpoint, streams PCM16 audio,
 and receives live transcription events. Used as a relay between the
 browser and the PwC GenAI realtime API.
+
+Uses the "transcription" session type for transcription-only mode
+(no audio output). See OpenAI Realtime Transcription docs.
 """
 
 import asyncio
@@ -71,7 +74,7 @@ class RealtimeSTTClient:
         await self._ws.send(json.dumps({
             "type": "session.update",
             "session": {
-                "modalities": ["text"],
+                "type": "transcription",
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
                     "model": GENAI_STT_MODEL,
@@ -119,6 +122,12 @@ class RealtimeSTTClient:
         elif event_type == "session.updated":
             logger.info("Realtime session configured")
 
+        # Transcription session events
+        elif event_type == "conversation.item.input_audio_transcription.delta":
+            delta = event.get("delta", "")
+            if delta:
+                await self.on_transcript({"type": "delta", "text": delta})
+
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = event.get("transcript", "")
             if transcript.strip():
@@ -127,16 +136,6 @@ class RealtimeSTTClient:
                     "text": transcript,
                     "item_id": event.get("item_id", ""),
                 })
-
-        elif event_type == "response.audio_transcript.delta":
-            delta = event.get("delta", "")
-            if delta:
-                await self.on_transcript({"type": "delta", "text": delta})
-
-        elif event_type == "response.audio_transcript.done":
-            transcript = event.get("transcript", "")
-            if transcript.strip():
-                await self.on_transcript({"type": "final", "text": transcript})
 
         elif event_type == "input_audio_buffer.speech_started":
             await self.on_transcript({"type": "speech_started"})
@@ -149,6 +148,9 @@ class RealtimeSTTClient:
             msg = error.get("message", str(error))
             logger.error(f"Realtime API error: {msg}")
             await self.on_error(msg)
+
+        else:
+            logger.debug(f"Unhandled realtime event: {event_type}")
 
     async def send_audio(self, pcm_bytes: bytes):
         """Send PCM16 audio data to the realtime API."""
